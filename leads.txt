@@ -1,0 +1,2 @@
+{'stage': 'completed', 'customer_name': None, 'bhk': None, 'budget': None, 'timeline': None, 'site_visit': None, 'visit_day': None, 'visit_time': None, 'lead_score': None, 'language': 'english'}
+
