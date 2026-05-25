@@ -24,10 +24,10 @@ Important files in this repository:
 
 | File | Purpose |
 |--------|--------|
-| app_V0.py | Initial prototype |
-| app_v1.py | Version 1 |
-| app_v2.py | Version 2 |
-| app_v3.py | Latest AI Calling Agent version |
+| app_V0.py | Initial prototype with Project Knowledge Base |
+| app_v1.py | Introduced RAG from Project Brochure |
+| app_v2.py | Improved version of RAG without hallucination |
+| app_v3.py | Fixed full cycle - Latest AI Calling Agent version |
 | make_call.py | Triggers outbound call |
 | leads.txt | Lead data |
 | sobha-townpark-brochure.pdf | Project brochure used for FAQ retrieval |
