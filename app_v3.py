@@ -5,6 +5,10 @@ import html
 import traceback
 import fitz
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from collections import Counter
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import Response
@@ -15,9 +19,9 @@ app = FastAPI()
 # CONFIG
 # =====================================================
 
-SARVAM_API_KEY = "sk_tttkw3yh_cSFe8L2vfkaLKLw1JnGgRNBT"
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 SARVAM_URL = "https://api.sarvam.ai/v1/chat/completions"
-MODEL = "sarvam-m"
+MODEL = "sarvam-105b-conversations"
 BROCHURE_FILE = "sobha-townpark-brochure.pdf"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BROCHURE_PATH = os.path.join(BASE_DIR, BROCHURE_FILE)
@@ -675,31 +679,40 @@ def generate_response(user_query, intent, brochure_context, top_score):
         "temperature": 0.1,
         "max_tokens": 180,
         "top_p": 1,
+        "reasoning_effort": None,
     }
 
     try:
-        response = requests.post(SARVAM_URL, headers=headers, json=payload, timeout=20)
+        response = requests.post(
+            SARVAM_URL,
+            headers=headers,
+            json=payload,
+            timeout=20
+        )
         response.raise_for_status()
+
         result = response.json()
-        print("=" * 50)
+
         print("SARVAM RAW RESPONSE:")
         print(result)
-        print("=" * 50)
 
         raw_answer = result["choices"][0]["message"]["content"]
-        finish_reason = result["choices"][0].get("finish_reason", "")
+        finish_reason = result["choices"][0].get("finish_reason", "stop")
+
         print("FINISH REASON:", finish_reason)
         print("RAW ANSWER PREVIEW:", raw_answer[:500])
 
         cleaned_answer = clean_response(raw_answer)
+
         if not cleaned_answer or finish_reason == "length":
             print("REASONING-ONLY / LENGTH LIMIT -> USING KB FALLBACK")
             return answer_from_kb(intent)
+
         return cleaned_answer
+
     except Exception as exc:
         print("SARVAM ERROR:", str(exc))
         return answer_from_kb(intent)
-
 
 def contains_word(text, word):
     """Whole-word match so 'not' does not match inside 'configurations'."""
@@ -1135,3 +1148,4 @@ async def root():
         "stage": conversation_memory["stage"],
         "faq_count": conversation_memory["faq_count"],
     }
+
