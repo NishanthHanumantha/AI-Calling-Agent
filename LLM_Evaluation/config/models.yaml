@@ -1,0 +1,94 @@
+eval_version: "1.1.0"
+dataset_version: "1.0.0"
+prompt_version: "1.0.0"
+timeout_seconds: 30
+temperature: 0.1
+max_tokens: 400
+max_retries: 2
+
+in_scope_providers:
+  - sarvam
+  - claude
+
+out_of_scope_providers:
+  - qwen
+
+active_model_aliases:
+  - sarvam_conversational
+  - sarvam_flagship
+  - claude_flagship
+  - claude_sonnet
+
+allowed_intents:
+  - PROJECT_FAQ
+  - PRICE_QUERY
+  - LOCATION_QUERY
+  - CONFIG_QUERY
+  - AMENITIES_QUERY
+  - QUALIFICATION
+  - SITE_VISIT
+  - CONFIRMATION
+  - UNKNOWN
+  - CLARIFY
+  - GENERAL
+
+allowed_actions:
+  - ANSWER
+  - QUALIFY
+  - BOOK_VISIT
+  - CONFIRM_SLOT
+  - CLARIFY
+  - DECLINE_UNKNOWN
+
+models:
+  sarvam_conversational:
+    enabled: true
+    provider: sarvam
+    role: conversational
+    api_key_env: SARVAM_API_KEY
+    model_env: SARVAM_CONVERSATIONAL_MODEL
+    default_model: sarvam-105b-conversations
+    base_url_env: SARVAM_BASE_URL
+    default_base_url: https://api.sarvam.ai/v1/chat/completions
+
+  sarvam_flagship:
+    enabled: true
+    provider: sarvam
+    role: flagship
+    api_key_env: SARVAM_API_KEY
+    model_env: SARVAM_FLAGSHIP_MODEL
+    default_model: sarvam-105b
+    base_url_env: SARVAM_BASE_URL
+    default_base_url: https://api.sarvam.ai/v1/chat/completions
+
+  claude_flagship:
+    enabled: true
+    provider: claude
+    role: flagship
+    api_key_env: ANTHROPIC_API_KEY
+    model_env: CLAUDE_FLAGSHIP_MODEL
+    default_model: claude-opus-4-8
+    base_url_env: ANTHROPIC_BASE_URL
+    default_base_url: https://api.anthropic.com/v1/messages
+    models_url: https://api.anthropic.com/v1/models
+
+  claude_sonnet:
+    enabled: true
+    provider: claude
+    role: general_purpose
+    api_key_env: ANTHROPIC_API_KEY
+    model_env: CLAUDE_SONNET_MODEL
+    default_model: claude-sonnet-4-6
+    base_url_env: ANTHROPIC_BASE_URL
+    default_base_url: https://api.anthropic.com/v1/messages
+    models_url: https://api.anthropic.com/v1/models
+
+  qwen:
+    enabled: false
+    provider: qwen
+    role: out_of_scope
+    api_key_env: QWEN_API_KEY
+    model_env: QWEN_MODEL
+    default_model: qwen-plus
+    base_url_env: QWEN_BASE_URL
+    default_base_url: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
