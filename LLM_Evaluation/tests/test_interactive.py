@@ -72,7 +72,7 @@ class FakeProvider:
 def _providers(**answers) -> dict[str, FakeProvider]:
     defaults = {
         "sarvam_conversational": "Townpark is near Electronic City.",
-        "sarvam_flagship": "Located on Hosur Road, Bengaluru.",
+        "deepseek_flagship": "Located on Hosur Road, Bengaluru.",
         "claude_sonnet": "SOBHA Townpark is in Bengaluru near Electronic City.",
         "claude_flagship": "It is near Electronic City on Hosur Road.",
     }
@@ -87,7 +87,7 @@ def make_session(providers=None, dry_run=False) -> InteractiveSession:
 def test_conversation_history_isolation():
     providers = _providers(
         sarvam_conversational="Answer A",
-        sarvam_flagship="Answer B",
+        deepseek_flagship="Answer B",
         claude_sonnet="Answer C",
         claude_flagship="Answer D",
     )
@@ -158,7 +158,7 @@ def test_error_isolation():
     by_alias = {r.alias: r for r in responses}
     assert by_alias["claude_sonnet"].error_type == "API_ERROR"
     assert by_alias["sarvam_conversational"].answer
-    assert by_alias["sarvam_flagship"].answer
+    assert by_alias["deepseek_flagship"].answer
     assert by_alias["claude_flagship"].answer
     rendered = render_turn(1, "Where is it located?", responses)
     assert "STATUS: ERROR" in rendered
@@ -280,6 +280,8 @@ def test_no_twilio_invocation():
     session = make_session()
     assert "DISABLED" in banner()
     assert "INTERACTIVE EVALUATION" in banner()
+    assert "DeepSeek — V4.1 Flash" in banner()
+    assert "Sarvam — Flagship" not in banner()
 
 
 def test_handle_commands_and_models_status():
@@ -300,6 +302,38 @@ def test_dry_run_zero_api_calls():
     assert "API calls made: 0" in report
     assert all(p.calls == [] for p in providers.values())
     assert session.turns  # dry-run still exercises the turn pipeline without live APIs
+
+
+def test_deepseek_error_does_not_stop_other_models():
+    providers = _providers()
+    providers["deepseek_flagship"].error = "HTTP 429"
+    session = make_session(providers)
+    responses = session.generate_turn("Where is it located?")
+    by_alias = {item.alias: item for item in responses}
+    assert by_alias["deepseek_flagship"].error_type == "API_ERROR"
+    assert by_alias["sarvam_conversational"].answer
+    assert by_alias["claude_sonnet"].answer
+    assert by_alias["claude_flagship"].answer
+    rendered = render_turn(1, "Where is it located?", responses)
+    assert "[2] DEEPSEEK — V4.1 FLASH" in rendered
+    assert "STATUS: ERROR" in rendered
+    assert "HTTP 429" in rendered
+    assert "SARVAM — CONVERSATIONAL" in rendered
+    ev = session.evaluate_latest()
+    scored = {item["alias"]: item for item in ev["models"]}
+    assert scored["deepseek_flagship"]["api_error"] is True
+    assert scored["deepseek_flagship"]["hallucination"] is None
+    assert scored["deepseek_flagship"]["intent_correct"] is None
+    assert scored["sarvam_conversational"].get("api_error") is not True
+    systems = [item.calls[0]["system_prompt"] for item in providers.values()]
+    contexts = [item.calls[0]["retrieved_context"] for item in providers.values()]
+    utterances = [item.calls[0]["customer_utterance"] for item in providers.values()]
+    assert len(set(systems)) == 1
+    assert len(set(contexts)) == 1
+    assert utterances == ["Where is it located?"] * 4
+    for alias, provider in providers.items():
+        history_text = " ".join(turn["content"] for turn in provider.calls[0]["conversation_history"])
+        assert provider.answer not in history_text
 
 
 def test_cli_parse_flags():

@@ -6,21 +6,21 @@ from typing import Any
 
 DISPLAY_ORDER = (
     "sarvam_conversational",
-    "sarvam_flagship",
+    "deepseek_flagship",
     "claude_sonnet",
     "claude_flagship",
 )
 
 DISPLAY_NAMES = {
     "sarvam_conversational": "SARVAM — CONVERSATIONAL",
-    "sarvam_flagship": "SARVAM — FLAGSHIP",
+    "deepseek_flagship": "DEEPSEEK — V4.1 FLASH",
     "claude_sonnet": "CLAUDE — SONNET",
     "claude_flagship": "CLAUDE — FLAGSHIP",
 }
 
 SHORT_NAMES = {
     "sarvam_conversational": "Sarvam C",
-    "sarvam_flagship": "Sarvam F",
+    "deepseek_flagship": "DS Flash",
     "claude_sonnet": "Claude S",
     "claude_flagship": "Claude F",
 }
@@ -29,7 +29,7 @@ COMMANDS = {
     "/help": "Show available commands",
     "/reset": "Start a new conversation",
     "/history": "Show conversation history",
-    "/evaluate": "Evaluate the latest turn (or `/evaluate session`)",
+    "/evaluate": "Evaluate the latest turn (or `/evaluate session` for every turn × every model)",
     "/save": "Save current session",
     "/export": "Export session results",
     "/models": "Show configured models",

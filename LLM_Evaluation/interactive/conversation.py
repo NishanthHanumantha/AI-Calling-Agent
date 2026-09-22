@@ -51,7 +51,7 @@ def detect_language(utterance: str) -> str:
         return "kn"
     if re.search(r"[\u0900-\u097F]", text):
         return "hi"
-    mixed_tokens = ("kya", "hai", "ka ", "ke ", "mujhe", "yelli", "ide", "heli", "alli", "sir")
+    mixed_tokens = ("kya", "hai", "ka ", "ke ", "mujhe", "yelli", "ide", "heli", "alli", "sir", "eshtu")
     lower = text.lower()
     if any(tok in lower for tok in mixed_tokens) and re.search(r"[a-z]", lower):
         return "mixed"
@@ -92,10 +92,20 @@ def content_tokens(text: str) -> set[str]:
     return {tok for tok in normalize_text(text).split() if tok not in STOPWORDS and len(tok) > 1}
 
 
+_SHORT_ACKS = {"yes", "yeah", "yep", "ok", "okay", "sure", "no", "hi", "hello", "hey"}
+
+
 def match_golden_case(utterance: str, dataset: list[dict]) -> dict | None:
     """Return a golden case if the utterance is clearly the same question. Never invent GT."""
     norm = normalize_text(utterance)
     if not norm:
+        return None
+    tokens = content_tokens(norm)
+    if norm in _SHORT_ACKS or len(tokens) < 2:
+        for case in dataset:
+            gold = normalize_text(case.get("customer_utterance") or "")
+            if gold == norm:
+                return case
         return None
     best = None
     best_score = 0.0

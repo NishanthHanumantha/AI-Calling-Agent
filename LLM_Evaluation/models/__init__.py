@@ -1,5 +1,6 @@
 from .base import LLMProvider, empty_result
 from .claude import ClaudeProvider
+from .deepseek import DeepSeekProvider
 from .qwen import QwenProvider
 from .sarvam import SarvamProvider
 
@@ -7,6 +8,7 @@ PROVIDER_CLASSES = {
     "sarvam": SarvamProvider,
     "qwen": QwenProvider,
     "claude": ClaudeProvider,
+    "deepseek": DeepSeekProvider,
 }
 
 

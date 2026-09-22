@@ -8,8 +8,8 @@ This is **not** a phone call. Twilio is never invoked. Production `app_v3.py`, `
 
 Interactively compare conversation intelligence across:
 
-1. Sarvam — Conversational (`sarvam_conversational`)
-2. Sarvam — Flagship (`sarvam_flagship`)
+1. Sarvam — Conversational (`sarvam_conversational`, `sarvam-105b-conversations`)
+2. DeepSeek — V4.1 Flash (`deepseek_flagship`, `deepseek-flash`)
 3. Claude — Sonnet (`claude_sonnet`)
 4. Claude — Flagship (`claude_flagship`)
 
@@ -30,7 +30,7 @@ Qwen is out of scope.
                    |
      +--------+--------+--------+
      v        v        v        v
- Sarvam C  Sarvam F  Claude S  Claude F
+ Sarvam C  DS Flash  Claude S  Claude F
  (isolated histories — a model never sees another model's replies)
                    |
           RESPONSE COLLECTION
@@ -38,7 +38,9 @@ Qwen is out of scope.
         DISPLAY / EVALUATE / EXPORT
 ```
 
-Adapters and `config/models.yaml` are reused from LLM-EVAL.1.1. No second `.env`. Keys come from the existing project `.env`.
+Adapters and `config/models.yaml` are reused from LLM-EVAL.1.1. No second `.env`. Keys come from the existing project `.env` (`DEEPSEEK_API_KEY` for the DeepSeek slot).
+
+The interactive lab does not use `sarvam_flagship`. The LLM-EVAL.1.1 batch active set is unchanged, so `python run_evaluation.py` still benchmarks the two Sarvam models and two Claude models. DeepSeek is registered and can be selected explicitly in a later batch run; this phase does not add it to that benchmark.
 
 Model-specific API formatting (Sarvam chat-completions vs Anthropic messages) is handled by existing providers. The **semantic** payload is identical: same system prompt, same retrieved Townpark KB, same customer utterance, same stage hint. Each model additionally receives **its own** prior assistant turns so follow-ups such as "Morning would be better" stay fair without leaking another model's wording.
 
@@ -217,7 +219,7 @@ Hi, I am interested in Sobha Townpark.
 ------------------------------------------------------------
 ...
 ------------------------------------------------------------
-[2] SARVAM — FLAGSHIP
+[2] DEEPSEEK — V4.1 FLASH
 ------------------------------------------------------------
 ...
 ------------------------------------------------------------
@@ -229,3 +231,42 @@ Hi, I am interested in Sobha Townpark.
 ------------------------------------------------------------
 ...
 ```
+
+## 14. Outbound simulation (LLM-EVAL.3)
+
+Customer-first mode is unchanged:
+
+```bash
+python -m LLM_Evaluation.interactive.cli
+```
+
+Outbound mode starts with the AI, then the customer:
+
+```bash
+python -m LLM_Evaluation.interactive.cli --mode outbound
+python -m LLM_Evaluation.interactive.cli --mode outbound --opening fixed
+python -m LLM_Evaluation.interactive.cli --mode outbound --demo
+```
+
+`--opening generated` is the default. Each model writes its own opening from the same system prompt and Townpark knowledge. `--opening fixed` seeds every model with the same approved opening and does not call the API for that first turn.
+
+Banner for outbound mode:
+
+```
+MODE: OFFLINE / OUTBOUND INTERACTIVE EVALUATION
+TWILIO: DISABLED
+```
+
+Baseline customer replies, used only by `--demo`:
+
+1. Yes, I have a couple of minutes.
+2. I'm looking for a 3 BHK.
+3. Where exactly is the project located?
+4. How much does it cost?
+5. Can I visit this Saturday?
+6. Morning would be better.
+7. Okay, I'll discuss it with my wife and get back to you.
+
+Manual branches (busy, not interested, ambiguous "How much?", unknown appreciation, competitor price) are evaluation scenarios. The lab does not inject scripted answers for them.
+
+Each model keeps its own history. The same customer line, knowledge, and system instructions go to all four. `/evaluate` and `/evaluate session` stay on the existing evaluator. There is no winner ranking.

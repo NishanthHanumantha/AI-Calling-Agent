@@ -85,3 +85,11 @@ def request_with_retry(
         except Exception as exc:
             return None, "OTHER_API_ERROR", type(exc).__name__
     return last_resp, last_error, last_message
+
+
+def chat_completions_url(base_url: str) -> str:
+    """OpenAI-compatible chat URL. Accepts a host or a full /chat/completions URL."""
+    base = (base_url or "").rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    return f"{base}/chat/completions"

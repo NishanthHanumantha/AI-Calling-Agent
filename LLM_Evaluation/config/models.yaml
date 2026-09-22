@@ -9,15 +9,24 @@ max_retries: 2
 in_scope_providers:
   - sarvam
   - claude
+  - deepseek
 
 out_of_scope_providers:
   - qwen
 
+# LLM-EVAL.1.1 batch benchmark. DeepSeek is not added here.
 active_model_aliases:
   - sarvam_conversational
   - sarvam_flagship
   - claude_flagship
   - claude_sonnet
+
+# LLM-EVAL.2 interactive lab. sarvam_flagship is not an interactive model.
+interactive_model_aliases:
+  - sarvam_conversational
+  - deepseek_flagship
+  - claude_sonnet
+  - claude_flagship
 
 allowed_intents:
   - PROJECT_FAQ
@@ -60,6 +69,18 @@ models:
     default_model: sarvam-105b
     base_url_env: SARVAM_BASE_URL
     default_base_url: https://api.sarvam.ai/v1/chat/completions
+
+  deepseek_flagship:
+    enabled: true
+    provider: deepseek
+    role: flagship
+    api_key_env: DEEPSEEK_API_KEY
+    model_env: DEEPSEEK_FLAGSHIP_MODEL
+    default_model: deepseek-flash
+    base_url_env: DEEPSEEK_BASE_URL
+    default_base_url: https://api.deepseek.com
+    thinking_mode_env: DEEPSEEK_THINKING_MODE
+    thinking_mode: disabled
 
   claude_flagship:
     enabled: true

@@ -4,7 +4,7 @@ from typing import Any
 
 import requests
 
-from .http_util import classify_http_error, request_with_retry
+from .http_util import chat_completions_url, classify_http_error, request_with_retry
 
 
 def _safe_json(resp: requests.Response | None) -> dict[str, Any]:
@@ -120,6 +120,66 @@ def check_sarvam_model(api_key: str, model_id: str, chat_url: str, timeout: int 
         "status": "UNAVAILABLE",
         "auth": "PASS" if err not in {"AUTH_ERROR"} else "FAIL",
         "model": "NOT FOUND" if err == "MODEL_NOT_FOUND" else "UNAVAILABLE",
+        "error_type": err,
+        "error_message": msg,
+        "available_model_ids": [],
+    }
+
+
+def check_deepseek_model(
+    api_key: str,
+    model_id: str,
+    base_url: str,
+    timeout: int = 30,
+    thinking_mode: str = "disabled",
+) -> dict[str, Any]:
+    """Minimal non-thinking chat completion. Missing keys are handled by the caller."""
+    from .deepseek import thinking_body
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model_id,
+        "messages": [{"role": "user", "content": "ok"}],
+        "max_tokens": 16,
+        "temperature": 0,
+        "thinking": thinking_body(thinking_mode),
+    }
+    resp, err, msg = request_with_retry(
+        "POST",
+        chat_completions_url(base_url),
+        max_retries=2,
+        timeout=timeout,
+        headers=headers,
+        json=payload,
+    )
+    if err == "AVAILABLE":
+        return {
+            "status": "AVAILABLE",
+            "auth": "PASS",
+            "model": "FOUND",
+            "error_type": None,
+            "error_message": "",
+            "available_model_ids": [model_id],
+        }
+    if err == "AUTH_ERROR":
+        return {
+            "status": "UNAVAILABLE",
+            "auth": "FAIL",
+            "model": "UNAVAILABLE",
+            "error_type": err,
+            "error_message": msg,
+            "available_model_ids": [],
+        }
+    body = (resp.text if resp is not None else "")[:500]
+    if resp is not None:
+        err = classify_http_error(resp.status_code, body)
+    return {
+        "status": "UNAVAILABLE",
+        "auth": "PASS" if err not in {"AUTH_ERROR"} else "FAIL",
+        "model": "UNAVAILABLE",
         "error_type": err,
         "error_message": msg,
         "available_model_ids": [],

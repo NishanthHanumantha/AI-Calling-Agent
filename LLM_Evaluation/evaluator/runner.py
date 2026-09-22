@@ -32,7 +32,7 @@ from .response_quality import maybe_run_judge, score_response_quality
 
 EVAL_VERSION = "1.1.0"
 LOGGER = logging.getLogger("llm_eval")
-IN_SCOPE_PROVIDERS = ("sarvam", "claude")
+IN_SCOPE_PROVIDERS = ("sarvam", "claude", "deepseek")
 ACTIVE_ALIASES = (
     "sarvam_conversational",
     "sarvam_flagship",
@@ -106,6 +106,14 @@ def load_text(path: Path) -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
+def _resolve_thinking_mode(spec: dict[str, Any]) -> str | None:
+    """Non-thinking unless the model spec or its env override says otherwise."""
+    env_name = (spec.get("thinking_mode_env") or "").strip()
+    from_env = (os.getenv(env_name, "") or "").strip() if env_name else ""
+    mode = from_env or (spec.get("thinking_mode") or "").strip()
+    return mode or None
+
+
 def resolve_model_runtime(name: str, spec: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     api_key = (os.getenv(spec.get("api_key_env", ""), "") or "").strip()
     model = (os.getenv(spec.get("model_env", ""), "") or spec.get("default_model") or "").strip()
@@ -131,6 +139,7 @@ def resolve_model_runtime(name: str, spec: dict[str, Any], config: dict[str, Any
         "max_tokens": config.get("max_tokens", 400),
         "max_retries": int(config.get("max_retries", 2)),
         "available": bool(in_scope and api_key and model and base_url),
+        "thinking_mode": _resolve_thinking_mode(spec),
         "api_key_env": spec.get("api_key_env"),
         "model_env": spec.get("model_env"),
         "config_source": spec.get("model_env") or "default_model",
