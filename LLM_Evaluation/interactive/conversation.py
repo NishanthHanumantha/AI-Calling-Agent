@@ -51,9 +51,12 @@ def detect_language(utterance: str) -> str:
         return "kn"
     if re.search(r"[\u0900-\u097F]", text):
         return "hi"
-    mixed_tokens = ("kya", "hai", "ka ", "ke ", "mujhe", "yelli", "ide", "heli", "alli", "sir", "eshtu")
+    mixed_re = re.compile(
+        r"\b(kya|hai|ka|ke|mujhe|yelli|ide|heli|alli|sir|eshtu|nanage|beku|yenu|bekagide|nanna)\b",
+        re.I,
+    )
     lower = text.lower()
-    if any(tok in lower for tok in mixed_tokens) and re.search(r"[a-z]", lower):
+    if mixed_re.search(lower) and re.search(r"[a-z]", lower):
         return "mixed"
     return "en"
 

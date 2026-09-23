@@ -12,6 +12,13 @@ def build_user_payload(
     """Identical logical user payload for every provider."""
     extra = extra or {}
     stage = extra.get("conversation_stage") or extra.get("stage") or "unknown"
+    visit_rule = extra.get("visit_rule")
+    visit_block = f"Visit sequence checkpoint: {visit_rule}\n\n" if visit_rule else ""
+    language_block = ""
+    language_track = extra.get("language_track")
+    if language_track:
+        instruction = extra.get("language_instruction") or f"Customer language track: {language_track}."
+        language_block = f"{instruction}\n\n"
     history_lines = []
     for turn in conversation_history or []:
         role = str(turn.get("role", "user")).upper()
@@ -20,6 +27,8 @@ def build_user_payload(
     history_block = "\n".join(history_lines) if history_lines else "(none)"
     return (
         f"Conversation stage: {stage}\n\n"
+        f"{language_block}"
+        f"{visit_block}"
         f"Retrieved context:\n{retrieved_context}\n\n"
         f"Conversation history:\n{history_block}\n\n"
         f"Customer utterance:\n{customer_utterance}\n\n"

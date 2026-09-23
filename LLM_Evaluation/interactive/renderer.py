@@ -20,14 +20,22 @@ def redact(text: Any) -> str:
     return SECRET_RE.sub("[REDACTED]", value)
 
 
-def banner(conversation_mode: str = "customer", opening_mode: str = "generated") -> str:
-    outbound = conversation_mode == "outbound"
-    mode_label = "LOCAL OUTBOUND EVALUATION" if outbound else "LOCAL INTERACTIVE EVALUATION"
-    mode_line = (
-        "MODE: OFFLINE / OUTBOUND INTERACTIVE EVALUATION"
-        if outbound
-        else "MODE: OFFLINE / INTERACTIVE EVALUATION"
-    )
+def banner(
+    conversation_mode: str = "customer",
+    opening_mode: str = "generated",
+    language_track: str | None = None,
+) -> str:
+    multilingual = conversation_mode == "multilingual" or bool(language_track)
+    outbound = conversation_mode == "outbound" or multilingual
+    if multilingual:
+        mode_label = "LOCAL MULTILINGUAL EVALUATION"
+        mode_line = "MODE: OFFLINE / MULTILINGUAL INTERACTIVE EVALUATION"
+    elif outbound:
+        mode_label = "LOCAL OUTBOUND EVALUATION"
+        mode_line = "MODE: OFFLINE / OUTBOUND INTERACTIVE EVALUATION"
+    else:
+        mode_label = "LOCAL INTERACTIVE EVALUATION"
+        mode_line = "MODE: OFFLINE / INTERACTIVE EVALUATION"
     lines = [
         RULE,
         "          AI CALLING AGENT",
@@ -52,6 +60,9 @@ def banner(conversation_mode: str = "customer", opening_mode: str = "generated")
     ]
     if outbound:
         lines += ["", f"Opening: {'FIXED' if opening_mode == 'fixed' else 'GENERATED'}"]
+    if multilingual:
+        track = language_track or "all"
+        lines += ["", f"Language track: {track}"]
     lines.append(LINE)
     return "\n".join(lines)
 
@@ -217,6 +228,9 @@ def render_evaluation(ev: dict[str, Any]) -> str:
         ev["utterance"],
         "",
         f"Ground Truth: {ev.get('ground_truth') or 'NOT AVAILABLE'}",
+        f"Expected Intent: {ev.get('expected_intent') or 'N/A'}",
+        f"Expected Action: {ev.get('expected_action') or 'N/A'}",
+        f"Expected Stage: {ev.get('expected_stage') or 'N/A'}",
         f"Detected Language: {ev.get('detected_language')}",
         "",
     ]
@@ -249,9 +263,12 @@ def render_evaluation(ev: dict[str, Any]) -> str:
         if model.get("visit_rule"):
             lines.append("Visit sequencing:")
             lines.append(f"Rule: {model.get('visit_rule')}")
+            if model.get("visit_sequence_code"):
+                lines.append(f"Code: {model.get('visit_sequence_code')}")
             lines.append(f"Asked for date: {_mark(model.get('asked_for_date'))}")
             lines.append(f"Offered time slots: {_mark(model.get('offered_time_slots'))}")
             lines.append(f"Premature confirmation: {_mark(model.get('premature_confirmation'))}")
+            lines.append(f"Premature slot offer: {_mark(model.get('premature_slot_offer'))}")
             lines.append(f"Visit sequence: {_check(model.get('visit_sequence_pass'))}")
             lines.append("")
         lines.append("Grounding:")
@@ -374,6 +391,9 @@ def render_session_summary(evaluations: list[dict[str, Any]]) -> str:
         "",
         f"{'Metric':<30}" + "".join(f"{c:>12}" for c in cols),
         "-" * 78,
+        "",
+        "Model quality metrics",
+        "-" * 78,
     ]
 
     def row(label: str, getter) -> None:
@@ -395,8 +415,6 @@ def render_session_summary(evaluations: list[dict[str, Any]]) -> str:
     row("Unsupported Claim Rate", lambda s: format_pct(s["unsupported_rate"]))
     row("Context Accuracy", lambda s: format_pct(s["context_accuracy"]))
     row("Stage Accuracy", lambda s: format_pct(s["stage_accuracy"]))
-    if any(summary[alias].get("visit_sequence_accuracy") is not None for alias in DISPLAY_ORDER):
-        row("Visit Sequence Accuracy", lambda s: format_pct(s.get("visit_sequence_accuracy")))
     row("Avg Relevance", lambda s: format_num(s["avg_relevance"]))
     row("Avg Completeness", lambda s: format_num(s["avg_completeness"]))
     row("Avg Clarity", lambda s: format_num(s["avg_clarity"]))
@@ -407,9 +425,31 @@ def render_session_summary(evaluations: list[dict[str, Any]]) -> str:
     row("P50 Latency", lambda s: format_num(s["p50_latency"]))
     row("P95 Latency", lambda s: format_num(s["p95_latency"]))
     if any(summary[alias].get("avg_total_tokens") is not None for alias in DISPLAY_ORDER):
-        row("Mean Total Tokens", lambda s: format_num(s["avg_total_tokens"]))
-        row("P50 Total Tokens", lambda s: format_num(s["p50_total_tokens"]))
-        row("P95 Total Tokens", lambda s: format_num(s["p95_total_tokens"]))
+        row("Mean Total Tokens", lambda s: format_num(s.get("avg_total_tokens")))
+        row("P50 Total Tokens", lambda s: format_num(s.get("p50_total_tokens")))
+        row("P95 Total Tokens", lambda s: format_num(s.get("p95_total_tokens")))
+    if any(summary[alias].get("avg_input_tokens") is not None for alias in DISPLAY_ORDER):
+        row("Mean Input Tokens", lambda s: format_num(s.get("avg_input_tokens")))
+        row("Mean Output Tokens", lambda s: format_num(s.get("avg_output_tokens")))
+    if any(summary[alias].get("language_understanding_accuracy") is not None for alias in DISPLAY_ORDER):
+        row("Language Understanding Accuracy", lambda s: format_pct(s.get("language_understanding_accuracy")))
+        row("Response Language Match %", lambda s: format_pct(s.get("response_language_match_pct")))
+    if any(summary[alias].get("structured_success_count") is not None for alias in DISPLAY_ORDER):
+        row("Structured Success Count", lambda s: format_num(s.get("structured_success_count")))
+        row("Malformed Response Count", lambda s: format_num(s.get("malformed_response_count")))
+        row("Empty Response Count", lambda s: format_num(s.get("empty_response_count")))
+        row("Timeout Count", lambda s: format_num(s.get("timeout_count")))
+    lines += ["", "Visit-sequence compliance", "-" * 78]
+    if any(summary[alias].get("visit_sequence_compliance") is not None for alias in DISPLAY_ORDER):
+        row("Visit Sequence Compliance", lambda s: format_pct(s.get("visit_sequence_compliance")))
+        row("Visit Sequence Accuracy", lambda s: format_pct(s.get("visit_sequence_accuracy")))
+    row("Premature Confirmation Count", lambda s: format_num(s.get("premature_confirmation_count")))
+    row("Premature Slot Offer Count", lambda s: format_num(s.get("premature_slot_offer_count")))
+    lines += ["", "Coverage", "-" * 78]
+    row("Evaluation Coverage", lambda s: format_pct(s.get("evaluation_coverage")))
+    row("Ground Truth Coverage", lambda s: format_pct(s.get("ground_truth_coverage")))
+    row("Intentionally Unlabelled Turns", lambda s: format_num(s.get("intentionally_unlabelled_turns")))
+    row("Unexpected Missing Ground Truth", lambda s: format_num(s.get("unexpected_missing_ground_truth")))
     if any(summary[alias]["intent"].get("confusion") for alias in DISPLAY_ORDER):
         lines += ["", "Intent confusion (labelled turns only):"]
         for alias in DISPLAY_ORDER:

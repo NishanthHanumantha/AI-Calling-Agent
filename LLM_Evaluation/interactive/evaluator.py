@@ -18,7 +18,15 @@ from .outbound import (
     response_naturalness,
     stage_labels,
 )
-from .outbound_ground_truth import customer_history_from_histories, infer_outbound_case
+from .multilingual import (
+    EXPECTED_CUSTOMER_LANGUAGE,
+    detect_response_language,
+    language_understanding_correct,
+    resolve_multilingual_ground_truth,
+    score_response_language,
+    structured_output_status,
+)
+from .outbound_ground_truth import customer_history_from_histories, resolve_outbound_ground_truth
 from .schemas import DISPLAY_ORDER, SHORT_NAMES, TurnResponse
 from .visit_policy import evaluate_visit_sequence, visit_booking_state
 
@@ -53,6 +61,10 @@ def _unscored_model_record(
     error_type: str | None = None,
     error_message: str | None = None,
     ground_truth: str = "NOT AVAILABLE",
+    expected_intent: str | None = None,
+    expected_action: str | None = None,
+    expected_stage: str | None = None,
+    ground_truth_applicable: bool = False,
     api_error: bool = False,
     note: str | None = None,
 ) -> dict[str, Any]:
@@ -67,6 +79,10 @@ def _unscored_model_record(
         "error_type": error_type,
         "error_message": error_message,
         "ground_truth": ground_truth,
+        "expected_intent": expected_intent,
+        "expected_action": expected_action,
+        "expected_stage": expected_stage,
+        "ground_truth_applicable": ground_truth_applicable,
         "intent_correct": None,
         "action_correct": None,
         "grounded": None,
@@ -83,6 +99,8 @@ def _unscored_model_record(
         "input_tokens": None,
         "output_tokens": None,
         "total_tokens": None,
+        "schema_valid": None,
+        "structured_output_status": status if status != EVAL_STATUS_MISSING_RESPONSE else "empty_response",
         "note": note,
     }
 
@@ -212,21 +230,47 @@ def evaluate_turn(
     *,
     outbound: bool = False,
     required_aliases: list[str] | None = None,
+    ground_truth_id: str | None = None,
+    language_track: str | None = None,
 ) -> dict[str, Any]:
     customer_history = customer_history_from_histories(histories)
     gold = None
-    if outbound:
-        gold = infer_outbound_case(utterance, turn_index, customer_history)
-        expected_stage, allowed_keys = outbound_expected_stage(utterance, turn_index, customer_history)
+    gt_applicable = False
+    if language_track:
+        gold, gt_applicable = resolve_multilingual_ground_truth(
+            language_track, utterance, turn_index, customer_history, ground_truth_id
+        )
+        expected_stage, allowed_keys = outbound_expected_stage(
+            utterance, turn_index, customer_history, ground_truth_id
+        )
+    elif outbound:
+        gold, gt_applicable = resolve_outbound_ground_truth(
+            utterance, turn_index, customer_history, ground_truth_id
+        )
+        expected_stage, allowed_keys = outbound_expected_stage(
+            utterance, turn_index, customer_history, ground_truth_id
+        )
     else:
         expected_stage = infer_stage(utterance, turn_index)
         allowed_keys = [expected_stage]
-    if gold is None:
+    if gold is None and not language_track:
         gold = match_golden_case(utterance, dataset)
+        if gold:
+            gt_applicable = True
     if gold and gold.get("conversation_stage"):
         expected_stage = gold["conversation_stage"]
         allowed_keys = gold.get("allowed_stage_keys") or [expected_stage]
     detected_lang = detect_language(utterance)
+    expected_customer_language = None
+    if language_track:
+        expected_customer_language = (gold or {}).get("expected_customer_language") or EXPECTED_CUSTOMER_LANGUAGE.get(
+            language_track
+        )
+    unlabeled = gold is None
+    expected_stage_label = STAGE_LABELS.get(expected_stage, expected_stage)
+    gt_id = gold.get("test_id") if gold else "NOT AVAILABLE"
+    gt_intent = None if unlabeled else gold.get("expected_intent")
+    gt_action = None if unlabeled else gold.get("expected_action")
     by_alias = {resp.alias: resp for resp in responses}
     aliases = list(required_aliases) if required_aliases is not None else [resp.alias for resp in responses]
     per_model = []
@@ -238,6 +282,11 @@ def evaluate_turn(
                     alias=alias,
                     status=EVAL_STATUS_MISSING_RESPONSE,
                     utterance=utterance,
+                    ground_truth=gt_id,
+                    expected_intent=gt_intent,
+                    expected_action=gt_action,
+                    expected_stage=expected_stage_label,
+                    ground_truth_applicable=gt_applicable,
                     note="Response missing — not scored as model quality failure",
                 )
             )
@@ -254,7 +303,11 @@ def evaluate_turn(
                     "api_error": True,
                     "error_type": resp.error_type,
                     "error_message": resp.error_message,
-                    "ground_truth": gold.get("test_id") if gold else "NOT AVAILABLE",
+                    "ground_truth": gt_id,
+                    "expected_intent": gt_intent,
+                    "expected_action": gt_action,
+                    "expected_stage": expected_stage_label,
+                    "ground_truth_applicable": gt_applicable,
                     "intent_correct": None,
                     "action_correct": None,
                     "grounded": None,
@@ -266,11 +319,16 @@ def evaluate_turn(
                     "clarity": None,
                     "conversational": None,
                     "stage_quality": None,
+                    "schema_valid": resp.schema_valid,
+                    "structured_output_status": structured_output_status(resp),
+                    "input_tokens": resp.input_tokens,
+                    "output_tokens": resp.output_tokens,
+                    "total_tokens": resp.total_tokens,
+                    "latency_ms": resp.latency_ms,
                     "note": "API/model error — not scored as quality failure",
                 }
             )
             continue
-        unlabeled = gold is None
         case = {
             "test_id": None if unlabeled else gold.get("test_id"),
             "category": "UNLABELED" if unlabeled else gold.get("category"),
@@ -279,9 +337,9 @@ def evaluate_turn(
             "conversation_history": histories.get(resp.alias) or [],
             "customer_utterance": utterance,
             "retrieved_context": retrieved_context,
-            "expected_intent": None if unlabeled else gold.get("expected_intent"),
+            "expected_intent": gt_intent,
             "expected_facts": [] if unlabeled else (gold.get("expected_facts") or gold.get("facts_any") or []),
-            "expected_action": None if unlabeled else gold.get("expected_action"),
+            "expected_action": gt_action,
             "acceptable_answer_criteria": "" if unlabeled else gold.get("acceptable_answer_criteria"),
         }
         generation = {
@@ -317,7 +375,11 @@ def evaluate_turn(
                     model_response=resp.answer or resp.raw_response,
                     error_type=EVAL_STATUS_EVALUATION_ERROR,
                     error_message=str(exc),
-                    ground_truth=gold.get("test_id") if gold else "NOT AVAILABLE",
+                    ground_truth=gt_id,
+                    expected_intent=gt_intent,
+                    expected_action=gt_action,
+                    expected_stage=expected_stage_label,
+                    ground_truth_applicable=gt_applicable,
                     note="Evaluator exception — not scored as model failure",
                 )
             )
@@ -377,7 +439,7 @@ def evaluate_turn(
             context_used = history_follow
             context_error = history_miss
         extras: dict[str, Any] = {}
-        if outbound:
+        if outbound or language_track:
             visit_state = visit_booking_state(customer_history, utterance)
             visit_eval = evaluate_visit_sequence(visit_state, resp.answer)
             extras = {
@@ -387,6 +449,18 @@ def evaluate_turn(
                 "exception_branch": exception_notes(utterance, resp.answer),
                 **visit_eval,
             }
+        if language_track:
+            extras.update(
+                {
+                    "language_track": language_track,
+                    "expected_customer_language": expected_customer_language,
+                    "response_language": detect_response_language(resp.answer),
+                    "response_language_match": score_response_language(
+                        expected_customer_language or detected_lang, resp.answer
+                    ),
+                    "language_understanding_correct": language_understanding_correct(intent_correct),
+                }
+            )
         per_model.append(
             {
                 "alias": resp.alias,
@@ -396,11 +470,12 @@ def evaluate_turn(
                 "customer_message": utterance,
                 "model_response": resp.answer or resp.raw_response,
                 "api_error": False,
-                "ground_truth": gold.get("test_id") if gold else "NOT AVAILABLE",
-                "expected_intent": None if unlabeled else gold.get("expected_intent"),
+                "ground_truth": gt_id,
+                "ground_truth_applicable": gt_applicable,
+                "expected_intent": gt_intent,
                 "predicted_intent": resp.intent,
                 "intent_correct": intent_correct,
-                "expected_action": None if unlabeled else gold.get("expected_action"),
+                "expected_action": gt_action,
                 "predicted_action": resp.action,
                 "action_correct": action_correct,
                 "supported_claims": row.get("facts_found") or [],
@@ -412,7 +487,7 @@ def evaluate_turn(
                 "context_used": context_used,
                 "context_error": context_error,
                 "context_handling": row.get("context_handling"),
-                "expected_stage": STAGE_LABELS.get(expected_stage, expected_stage),
+                "expected_stage": expected_stage_label,
                 "model_stage": STAGE_LABELS.get(model_stage, model_stage),
                 "stage_correct": stage_correct,
                 "detected_language": resp.language or detect_language(resp.answer or utterance),
@@ -427,6 +502,8 @@ def evaluate_turn(
                 "input_tokens": resp.input_tokens,
                 "output_tokens": resp.output_tokens,
                 "total_tokens": resp.total_tokens,
+                "schema_valid": resp.schema_valid,
+                "structured_output_status": structured_output_status(resp),
                 "raw_eval": row,
                 **extras,
             }
@@ -435,8 +512,14 @@ def evaluate_turn(
         "utterance": utterance,
         "turn_index": turn_index,
         "turn_id": turn_index,
-        "ground_truth": gold.get("test_id") if gold else "NOT AVAILABLE",
+        "ground_truth": gt_id,
+        "ground_truth_applicable": gt_applicable,
+        "expected_intent": gt_intent,
+        "expected_action": gt_action,
+        "expected_stage": expected_stage_label,
         "detected_language": detected_lang,
+        "language_track": language_track,
+        "expected_customer_language": expected_customer_language,
         "conversation_mode": "outbound" if outbound else "customer",
         "models": per_model,
     }
@@ -481,15 +564,34 @@ def session_summary(evaluations: list[dict[str, Any]]) -> dict[str, dict[str, An
         stage_labeled = [r for r in quality if r.get("stage_correct") is not None]
         tokens = [r.get("total_tokens") for r in quality if r.get("total_tokens") is not None]
         tokens_sorted = sorted(tokens)
+        input_tokens = [r.get("input_tokens") for r in quality if r.get("input_tokens") is not None]
+        output_tokens = [r.get("output_tokens") for r in quality if r.get("output_tokens") is not None]
         intent_stats = _classification_prf(intent_pairs)
         action_stats = _classification_prf(action_pairs)
         intent_stats["confusion"] = confusion_matrix(intent_pairs)
         action_stats["confusion"] = confusion_matrix(action_pairs)
+        gt_applicable_rows = [r for r in quality if r.get("ground_truth_applicable")]
+        gt_covered = [r for r in gt_applicable_rows if r.get("expected_intent")]
+        unexpected_missing = [
+            r for r in gt_applicable_rows if not r.get("expected_intent")
+        ]
+        intentionally_unlabelled = [
+            r for r in quality if not r.get("ground_truth_applicable")
+        ]
+        visit_compliance = (
+            round(sum(1 for r in visit_rows if r.get("visit_sequence_pass")) / len(visit_rows), 4)
+            if visit_rows
+            else None
+        )
+        lu_rows = [r for r in quality if r.get("language_understanding_correct") is not None]
+        lang_match_rows = [r for r in quality if r.get("response_language_match")]
+        statuses = [r.get("structured_output_status") for r in rows if r.get("structured_output_status")]
         out[alias] = {
             "short": SHORT_NAMES[alias],
             "n_turns": len(rows),
             "n_scored": len(quality),
             "n_api_errors": sum(1 for r in rows if r.get("api_error")),
+            "evaluation_coverage": round(len(quality) / len(rows), 4) if rows else None,
             "intent": intent_stats,
             "action": action_stats,
             "factual_accuracy": round(sum(facts) / len(facts), 4) if facts else None,
@@ -510,11 +612,15 @@ def session_summary(evaluations: list[dict[str, Any]]) -> dict[str, dict[str, An
                 if stage_labeled
                 else None
             ),
-            "visit_sequence_accuracy": (
-                round(sum(1 for r in visit_rows if r.get("visit_sequence_pass")) / len(visit_rows), 4)
-                if visit_rows
-                else None
+            "visit_sequence_accuracy": visit_compliance,
+            "visit_sequence_compliance": visit_compliance,
+            "premature_confirmation_count": sum(1 for r in quality if r.get("premature_confirmation")),
+            "premature_slot_offer_count": sum(1 for r in quality if r.get("premature_slot_offer")),
+            "ground_truth_coverage": (
+                round(len(gt_covered) / len(gt_applicable_rows), 4) if gt_applicable_rows else None
             ),
+            "intentionally_unlabelled_turns": len({r.get("turn_id") for r in intentionally_unlabelled}),
+            "unexpected_missing_ground_truth": len({r.get("turn_id") for r in unexpected_missing}),
             "avg_relevance": _avg([r.get("relevance") for r in quality]),
             "avg_completeness": _avg([r.get("completeness") for r in quality]),
             "avg_clarity": _avg([r.get("clarity") for r in quality]),
@@ -526,6 +632,22 @@ def session_summary(evaluations: list[dict[str, Any]]) -> dict[str, dict[str, An
             "avg_total_tokens": _avg(tokens),
             "p50_total_tokens": tokens_sorted[int(round((len(tokens_sorted) - 1) * 0.5))] if tokens_sorted else None,
             "p95_total_tokens": tokens_sorted[int(round((len(tokens_sorted) - 1) * 0.95))] if tokens_sorted else None,
+            "avg_input_tokens": _avg(input_tokens),
+            "avg_output_tokens": _avg(output_tokens),
+            "language_understanding_accuracy": (
+                round(sum(1 for r in lu_rows if r.get("language_understanding_correct")) / len(lu_rows), 4)
+                if lu_rows
+                else None
+            ),
+            "response_language_match_pct": (
+                round(sum(1 for r in lang_match_rows if r.get("response_language_match") == "MATCH") / len(lang_match_rows), 4)
+                if lang_match_rows
+                else None
+            ),
+            "structured_success_count": sum(1 for s in statuses if s == "successful_structured"),
+            "malformed_response_count": sum(1 for s in statuses if s == "malformed_response"),
+            "empty_response_count": sum(1 for s in statuses if s == "empty_response"),
+            "timeout_count": sum(1 for s in statuses if s == "timeout"),
         }
     return out
 

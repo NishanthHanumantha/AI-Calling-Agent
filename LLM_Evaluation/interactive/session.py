@@ -4,7 +4,8 @@ import csv
 import json
 import logging
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,7 +41,9 @@ from .outbound import (
     fixed_opening_responses,
     shared_stage,
 )
-from .visit_policy import SITE_VISIT_SCHEDULING_RULE
+from .multilingual import LANGUAGE_INSTRUCTIONS, stamped_multilingual_id
+from .outbound_ground_truth import stamped_ground_truth_id
+from .visit_policy import SITE_VISIT_SCHEDULING_RULE, visit_booking_state
 from .renderer import redact
 from .schemas import DISPLAY_ORDER, DISPLAY_NAMES, ModelSlot, TurnResponse
 
@@ -89,12 +92,18 @@ class InteractiveSession:
         providers: dict[str, Any] | None = None,
         conversation_mode: str = "customer",
         opening_mode: str = "generated",
+        language_track: str | None = None,
     ):
         bootstrap_path()
         load_env()
         self.dry_run = dry_run
         self.max_display_chars = max_display_chars
-        self.conversation_mode = "outbound" if conversation_mode == "outbound" else "customer"
+        if conversation_mode == "multilingual":
+            self.conversation_mode = "outbound"
+            self.language_track = language_track or "english"
+        else:
+            self.conversation_mode = "outbound" if conversation_mode == "outbound" else "customer"
+            self.language_track = language_track
         self.opening_mode = "fixed" if opening_mode == "fixed" else "generated"
         self.eval_root = root_dir()
         self.config = load_yaml_config(config_path)
@@ -171,6 +180,7 @@ class InteractiveSession:
         self.evaluations: list[dict[str, Any]] = []
         self.last_debug: dict[str, Any] = {}
         self.exported_dir: Path | None = None
+        self.collect_timeout_seconds: float | None = None
 
     def reset(self) -> None:
         self.histories = {alias: [] for alias in DISPLAY_ORDER}
@@ -181,11 +191,40 @@ class InteractiveSession:
     def next_turn_index(self) -> int:
         return len(self.turns) + 1
 
+    def _request_extra(self, utterance: str, turn_index: int, customer_history: list[str]) -> dict[str, Any]:
+        stage = shared_stage(utterance, turn_index, self.conversation_mode, customer_history)
+        extra: dict[str, Any] = {"conversation_stage": stage, "stage": stage}
+        if self.language_track:
+            extra["visit_rule"] = visit_booking_state(customer_history, utterance).expected_rule
+            extra["language_track"] = self.language_track
+            extra["language_instruction"] = LANGUAGE_INSTRUCTIONS.get(self.language_track)
+        elif self.conversation_mode == "outbound":
+            extra["visit_rule"] = visit_booking_state(customer_history, utterance).expected_rule
+        return extra
+
+    def collect_deadline_seconds(self) -> float:
+        """Upper bound for waiting on parallel model calls. Uses configured HTTP timeout × attempts."""
+        if self.collect_timeout_seconds is not None:
+            return float(self.collect_timeout_seconds)
+        timeout = 30.0
+        retries = 2
+        for slot in self.slots:
+            runtime = slot.runtime or {}
+            timeout = max(timeout, float(runtime.get("timeout") or 30))
+            retries = max(retries, int(runtime.get("max_retries") or 2))
+        return timeout * (retries + 1) + 2.0
+
     def generate_turn(self, utterance: str) -> list[TurnResponse]:
         turn_index = self.next_turn_index()
         customer_history = [t["utterance"] for t in self.turns if t.get("kind") != "opening"]
-        stage = shared_stage(utterance, turn_index, self.conversation_mode, customer_history)
-        extra = {"conversation_stage": stage, "stage": stage}
+        extra = self._request_extra(utterance, turn_index, customer_history)
+        ground_truth_id = None
+        if self.language_track:
+            ground_truth_id = stamped_multilingual_id(
+                self.language_track, utterance, turn_index, customer_history
+            )
+        elif self.conversation_mode == "outbound":
+            ground_truth_id = stamped_ground_truth_id(utterance, turn_index, customer_history)
         histories_snapshot = {alias: list(items) for alias, items in self.histories.items()}
         payloads = {}
         for alias in DISPLAY_ORDER:
@@ -201,8 +240,11 @@ class InteractiveSession:
             "retrieved_knowledge": self.retrieved_context,
             "system_instructions_summary": self.system_prompt.split("\n", 1)[0][:240],
             "conversation_mode": self.conversation_mode,
+            "language_track": self.language_track,
             "opening_mode": self.opening_mode if self.conversation_mode == "outbound" else None,
             "conversation_stage": extra["conversation_stage"],
+            "visit_rule": extra.get("visit_rule"),
+            "ground_truth_id": ground_truth_id,
             "same_user_message": True,
             "same_retrieved_knowledge": True,
             "same_system_prompt": True,
@@ -235,6 +277,7 @@ class InteractiveSession:
                 "responses": [asdict(item) for item in ordered],
                 "histories_before": histories_snapshot,
                 "kind": "customer",
+                "ground_truth_id": ground_truth_id,
             }
         )
         return ordered
@@ -250,6 +293,9 @@ class InteractiveSession:
         else:
             instruction = OPENING_INSTRUCTION
             extra = {"conversation_stage": "greeting", "stage": "greeting"}
+            if self.language_track:
+                extra["language_track"] = self.language_track
+                extra["language_instruction"] = LANGUAGE_INSTRUCTIONS.get(self.language_track)
             payloads = {
                 alias: {
                     "system_prompt": self.system_prompt,
@@ -282,6 +328,7 @@ class InteractiveSession:
             "user_message": instruction or FIXED_OPENING,
             "opening_mode": self.opening_mode,
             "conversation_mode": self.conversation_mode,
+            "language_track": self.language_track,
             "retrieved_knowledge": self.retrieved_context,
             "system_instructions_summary": self.system_prompt.split("\n", 1)[0][:240],
             "conversation_stage": "greeting",
@@ -301,58 +348,139 @@ class InteractiveSession:
         }
         return ordered
 
+    def _blank_response(
+        self,
+        slot: ModelSlot,
+        *,
+        error_type: str,
+        error_message: str,
+        latency_ms: int | None = None,
+    ) -> TurnResponse:
+        return TurnResponse(
+            alias=slot.alias,
+            provider=slot.provider,
+            model_id=slot.model_id,
+            answer=None,
+            intent=None,
+            action=None,
+            language=None,
+            stage=None,
+            raw_response="",
+            latency_ms=latency_ms,
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=None,
+            error_type=error_type,
+            error_message=_safe_error(error_message),
+            schema_valid=None,
+        )
+
     def _collect(self, payloads: dict[str, dict[str, Any]]) -> list[TurnResponse]:
         responses: dict[str, TurnResponse] = {}
         if self.dry_run:
             for slot in self.slots:
-                responses[slot.alias] = TurnResponse(
-                    alias=slot.alias,
-                    provider=slot.provider,
-                    model_id=slot.model_id,
-                    answer=None,
-                    intent=None,
-                    action=None,
-                    language=None,
-                    stage=None,
-                    raw_response="",
-                    latency_ms=None,
-                    input_tokens=None,
-                    output_tokens=None,
-                    total_tokens=None,
-                    error_type="DRY_RUN",
-                    error_message="Dry-run: no API call made",
-                    schema_valid=None,
+                responses[slot.alias] = self._blank_response(
+                    slot, error_type="DRY_RUN", error_message="Dry-run: no API call made"
                 )
-        else:
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                futures = {
-                    pool.submit(self._call_model, slot, payloads[slot.alias]): slot.alias for slot in self.slots
-                }
-                for future in as_completed(futures):
-                    alias = futures[future]
-                    try:
-                        responses[alias] = future.result()
-                    except Exception as exc:
-                        slot = next(s for s in self.slots if s.alias == alias)
-                        responses[alias] = TurnResponse(
-                            alias=alias,
-                            provider=slot.provider,
-                            model_id=slot.model_id,
-                            answer=None,
-                            intent=None,
-                            action=None,
-                            language=None,
-                            stage=None,
-                            raw_response="",
-                            latency_ms=None,
-                            input_tokens=None,
-                            output_tokens=None,
-                            total_tokens=None,
-                            error_type="API_ERROR",
-                            error_message=_safe_error(str(exc)),
-                            schema_valid=None,
-                        )
+            return [responses[alias] for alias in DISPLAY_ORDER]
+
+        budget = self.collect_deadline_seconds()
+        LOGGER.info(
+            "MODEL REQUEST START aliases=%s language_track=%s timeout_s=%.1f",
+            list(DISPLAY_ORDER),
+            self.language_track,
+            budget,
+        )
+        executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="llm-eval-model")
+        try:
+            futures = {
+                executor.submit(self._call_model_logged, slot, payloads[slot.alias]): slot
+                for slot in self.slots
+            }
+            done, pending = wait(set(futures), timeout=budget)
+            for future in done:
+                slot = futures[future]
+                try:
+                    responses[slot.alias] = future.result()
+                except Exception as exc:
+                    LOGGER.warning(
+                        "MODEL REQUEST ERROR model=%s provider=%s error=%s",
+                        slot.alias,
+                        slot.provider,
+                        type(exc).__name__,
+                    )
+                    responses[slot.alias] = self._blank_response(
+                        slot,
+                        error_type="API_ERROR",
+                        error_message=str(exc),
+                        latency_ms=int(budget * 1000),
+                    )
+            for future in pending:
+                slot = futures[future]
+                LOGGER.warning(
+                    "MODEL REQUEST TIMEOUT model=%s provider=%s timeout_s=%.1f",
+                    slot.alias,
+                    slot.provider,
+                    budget,
+                )
+                future.cancel()
+                responses[slot.alias] = self._blank_response(
+                    slot,
+                    error_type="TIMEOUT",
+                    error_message=f"evaluation-layer timeout after {budget:.1f}s",
+                    latency_ms=int(budget * 1000),
+                )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        for alias in DISPLAY_ORDER:
+            if alias in responses:
+                continue
+            slot = next((item for item in self.slots if item.alias == alias), None)
+            if slot is None:
+                continue
+            responses[alias] = self._blank_response(
+                slot,
+                error_type="TIMEOUT",
+                error_message=f"evaluation-layer timeout after {budget:.1f}s",
+                latency_ms=int(budget * 1000),
+            )
         return [responses[alias] for alias in DISPLAY_ORDER]
+
+    def _call_model_logged(self, slot: ModelSlot, payload: dict[str, Any]) -> TurnResponse:
+        extra = payload.get("extra") or {}
+        LOGGER.info(
+            "MODEL REQUEST START model=%s provider=%s language_track=%s",
+            slot.alias,
+            slot.provider,
+            extra.get("language_track"),
+        )
+        started = time.perf_counter()
+        try:
+            resp = self._call_model(slot, payload)
+        except Exception:
+            LOGGER.exception(
+                "MODEL REQUEST ERROR model=%s provider=%s",
+                slot.alias,
+                slot.provider,
+            )
+            raise
+        latency = resp.latency_ms if resp.latency_ms is not None else int((time.perf_counter() - started) * 1000)
+        if resp.error_type:
+            LOGGER.warning(
+                "MODEL REQUEST ERROR model=%s provider=%s error_type=%s latency_ms=%s",
+                slot.alias,
+                slot.provider,
+                resp.error_type,
+                latency,
+            )
+        else:
+            LOGGER.info(
+                "MODEL REQUEST END model=%s provider=%s latency_ms=%s",
+                slot.alias,
+                slot.provider,
+                latency,
+            )
+        return resp
 
     def _call_model(self, slot: ModelSlot, payload: dict[str, Any]) -> TurnResponse:
         if slot.alias not in self._providers:
@@ -444,6 +572,8 @@ class InteractiveSession:
                 self.retrieved_context,
                 outbound=self.conversation_mode == "outbound",
                 required_aliases=list(DISPLAY_ORDER),
+                ground_truth_id=turn.get("ground_truth_id"),
+                language_track=self.language_track,
             )
         return self._attach_record_identity(ev, turn)
 
@@ -505,11 +635,7 @@ class InteractiveSession:
     def preview_payloads(self, utterance: str) -> dict[str, str]:
         """Build semantically identical user payloads without calling APIs."""
         customer_history = [t["utterance"] for t in self.turns if t.get("kind") != "opening"]
-        extra = {
-            "conversation_stage": shared_stage(
-                utterance, self.next_turn_index(), self.conversation_mode, customer_history
-            )
-        }
+        extra = self._request_extra(utterance, self.next_turn_index(), customer_history)
         return {
             alias: build_user_payload(self.histories[alias], utterance, self.retrieved_context, extra)
             for alias in DISPLAY_ORDER
@@ -527,6 +653,7 @@ class InteractiveSession:
                 else "OFFLINE / INTERACTIVE EVALUATION"
             ),
             "conversation_mode": self.conversation_mode,
+            "language_track": self.language_track,
             "opening_mode": self.opening_mode if self.conversation_mode == "outbound" else None,
             "twilio": "DISABLED",
             "retrieved_context": self.retrieved_context,
@@ -568,6 +695,13 @@ class InteractiveSession:
             ("context_accuracy", lambda s: s["context_accuracy"]),
             ("stage_accuracy", lambda s: s["stage_accuracy"]),
             ("visit_sequence_accuracy", lambda s: s.get("visit_sequence_accuracy")),
+            ("visit_sequence_compliance", lambda s: s.get("visit_sequence_compliance")),
+            ("premature_confirmation_count", lambda s: s.get("premature_confirmation_count")),
+            ("premature_slot_offer_count", lambda s: s.get("premature_slot_offer_count")),
+            ("evaluation_coverage", lambda s: s.get("evaluation_coverage")),
+            ("ground_truth_coverage", lambda s: s.get("ground_truth_coverage")),
+            ("intentionally_unlabelled_turns", lambda s: s.get("intentionally_unlabelled_turns")),
+            ("unexpected_missing_ground_truth", lambda s: s.get("unexpected_missing_ground_truth")),
             ("avg_relevance", lambda s: s["avg_relevance"]),
             ("avg_completeness", lambda s: s["avg_completeness"]),
             ("avg_clarity", lambda s: s["avg_clarity"]),
@@ -575,6 +709,18 @@ class InteractiveSession:
             ("avg_latency", lambda s: s["avg_latency"]),
             ("p50_latency", lambda s: s["p50_latency"]),
             ("p95_latency", lambda s: s["p95_latency"]),
+            ("avg_total_tokens", lambda s: s.get("avg_total_tokens")),
+            ("p50_total_tokens", lambda s: s.get("p50_total_tokens")),
+            ("p95_total_tokens", lambda s: s.get("p95_total_tokens")),
+            ("avg_input_tokens", lambda s: s.get("avg_input_tokens")),
+            ("avg_output_tokens", lambda s: s.get("avg_output_tokens")),
+            ("avg_naturalness", lambda s: s.get("avg_naturalness")),
+            ("language_understanding_accuracy", lambda s: s.get("language_understanding_accuracy")),
+            ("response_language_match_pct", lambda s: s.get("response_language_match_pct")),
+            ("structured_success_count", lambda s: s.get("structured_success_count")),
+            ("malformed_response_count", lambda s: s.get("malformed_response_count")),
+            ("empty_response_count", lambda s: s.get("empty_response_count")),
+            ("timeout_count", lambda s: s.get("timeout_count")),
         ]
         with csv_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -655,6 +801,12 @@ class InteractiveSession:
                 "Hallucination",
                 "Context Correct",
                 "Stage Correct",
+                "Expected Intent",
+                "Expected Action",
+                "Expected Stage",
+                "Ground Truth",
+                "Visit Sequence Pass",
+                "Visit Sequence Code",
                 "Relevance",
                 "Completeness",
                 "Clarity",
@@ -682,6 +834,12 @@ class InteractiveSession:
                         model.get("hallucination"),
                         ctx if not model.get("api_error") else None,
                         model.get("stage_correct"),
+                        model.get("expected_intent"),
+                        model.get("expected_action"),
+                        model.get("expected_stage"),
+                        model.get("ground_truth"),
+                        model.get("visit_sequence_pass"),
+                        model.get("visit_sequence_code"),
                         model.get("relevance"),
                         model.get("completeness"),
                         model.get("clarity"),
@@ -706,6 +864,13 @@ class InteractiveSession:
             ("Context Accuracy", lambda s: s["context_accuracy"]),
             ("Stage Accuracy", lambda s: s["stage_accuracy"]),
             ("Visit Sequence Accuracy", lambda s: s.get("visit_sequence_accuracy")),
+            ("Visit Sequence Compliance", lambda s: s.get("visit_sequence_compliance")),
+            ("Premature Confirmation Count", lambda s: s.get("premature_confirmation_count")),
+            ("Premature Slot Offer Count", lambda s: s.get("premature_slot_offer_count")),
+            ("Evaluation Coverage", lambda s: s.get("evaluation_coverage")),
+            ("Ground Truth Coverage", lambda s: s.get("ground_truth_coverage")),
+            ("Intentionally Unlabelled Turns", lambda s: s.get("intentionally_unlabelled_turns")),
+            ("Unexpected Missing Ground Truth", lambda s: s.get("unexpected_missing_ground_truth")),
             ("Avg Relevance", lambda s: s["avg_relevance"]),
             ("Avg Completeness", lambda s: s["avg_completeness"]),
             ("Avg Clarity", lambda s: s["avg_clarity"]),
@@ -713,6 +878,18 @@ class InteractiveSession:
             ("Avg Latency", lambda s: s["avg_latency"]),
             ("P50 Latency", lambda s: s["p50_latency"]),
             ("P95 Latency", lambda s: s["p95_latency"]),
+            ("Mean Total Tokens", lambda s: s.get("avg_total_tokens")),
+            ("P50 Total Tokens", lambda s: s.get("p50_total_tokens")),
+            ("P95 Total Tokens", lambda s: s.get("p95_total_tokens")),
+            ("Mean Input Tokens", lambda s: s.get("avg_input_tokens")),
+            ("Mean Output Tokens", lambda s: s.get("avg_output_tokens")),
+            ("Avg Naturalness", lambda s: s.get("avg_naturalness")),
+            ("Language Understanding Accuracy", lambda s: s.get("language_understanding_accuracy")),
+            ("Response Language Match %", lambda s: s.get("response_language_match_pct")),
+            ("Structured Success Count", lambda s: s.get("structured_success_count")),
+            ("Malformed Response Count", lambda s: s.get("malformed_response_count")),
+            ("Empty Response Count", lambda s: s.get("empty_response_count")),
+            ("Timeout Count", lambda s: s.get("timeout_count")),
         ]
         for label, getter in rows:
             sum_ws.append([label] + [getter(summary[alias]) for alias in DISPLAY_ORDER])

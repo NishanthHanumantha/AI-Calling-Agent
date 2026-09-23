@@ -181,6 +181,7 @@ def evaluate_opening(
                     "output_tokens": None,
                     "total_tokens": None,
                     "note": "Response missing — not scored as model quality failure",
+                    "ground_truth_applicable": False,
                 }
             )
             continue
@@ -226,6 +227,7 @@ def evaluate_opening(
                 "model_response": text,
                 "api_error": False,
                 "ground_truth": "NOT AVAILABLE",
+                "ground_truth_applicable": False,
                 "predicted_intent": resp.intent,
                 "intent_correct": None,
                 "predicted_action": resp.action,
@@ -255,6 +257,7 @@ def evaluate_opening(
         "utterance": "",
         "opening_mode": opening_mode,
         "ground_truth": "NOT AVAILABLE",
+        "ground_truth_applicable": False,
         "detected_language": "en",
         "models": models,
     }
@@ -264,11 +267,12 @@ def outbound_expected_stage(
     utterance: str,
     turn_index: int,
     customer_history: list[dict[str, str]] | list[str] | None = None,
+    ground_truth_id: str | None = None,
 ) -> tuple[str, list[str]]:
     """Primary stage key plus allowed keys. Uses existing stage names."""
     from .outbound_ground_truth import infer_outbound_case
 
-    labelled = infer_outbound_case(utterance, turn_index, customer_history)
+    labelled = infer_outbound_case(utterance, turn_index, customer_history, ground_truth_id)
     if labelled:
         stage = labelled["conversation_stage"]
         return stage, labelled.get("allowed_stage_keys") or [stage]
