@@ -6,6 +6,8 @@ pytest-cache-files-*/
 output/runs/
 output/interactive_runs/**
 !output/interactive_runs/.gitkeep
+output/live_voice_runs/**
+!output/live_voice_runs/.gitkeep
 output/*.csv
 output/*.xlsx
 output/*.jsonl

@@ -1,0 +1,25 @@
+# PROPOSED Nginx fragment for four-model live-voice evaluation.
+# Do not apply until explicitly approved.
+# Do not change the existing location that proxies production /voice
+# to uvicorn app_v3 on 127.0.0.1:8000.
+
+# Assumes an existing TLS server_name that already reverse-proxies
+# the production calling agent.
+
+location /eval/ {
+    proxy_pass http://127.0.0.1:8001/eval/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 30s;
+    proxy_send_timeout 30s;
+}
+
+# After approval:
+# 1. Keep production: uvicorn app_v3:app  (existing bind, typically 127.0.0.1:8000)
+# 2. Start eval: uvicorn LLM_Evaluation.live_voice.twilio_app:app --host 127.0.0.1 --port 8001
+# 3. nginx -t && reload
+# 4. After the campaign, remove or comment this location, reload, stop port 8001.

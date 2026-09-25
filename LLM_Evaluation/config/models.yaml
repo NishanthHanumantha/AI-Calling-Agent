@@ -113,3 +113,20 @@ models:
     default_model: qwen-plus
     base_url_env: QWEN_BASE_URL
     default_base_url: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+
+# Independent live-voice judge. Not a candidate. Not in active_model_aliases
+# or interactive_model_aliases. Same-ID judging of a candidate is forbidden.
+live_voice:
+  judge:
+    provider: claude
+    provider_env: LIVE_EVAL_JUDGE_PROVIDER
+    api_key_env: LIVE_EVAL_JUDGE_API_KEY
+    fallback_api_key_env:
+      - JUDGE_API_KEY
+      - ANTHROPIC_API_KEY
+    model_env: LIVE_EVAL_JUDGE_MODEL
+    base_url_env: LIVE_EVAL_JUDGE_BASE_URL
+    default_base_url: https://api.anthropic.com/v1/messages
+    temperature: 0
+    max_tokens: 2000
+    timeout_seconds: 60
