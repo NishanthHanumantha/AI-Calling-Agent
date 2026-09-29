@@ -338,11 +338,11 @@ def gather_block(prompt_text):
     return f"""
 <Gather
 input="speech"
-action="/handle-speech"
+action="https://s-ai-calling-agent.duckdns.org/handle-speech"
 method="POST"
 actionOnEmptyResult="true"
 timeout="{GATHER_TIMEOUT}"
-speechTimeout="auto"
+speechTimeout="5" speechModel="experimental_utterances"
 hints="{hints_attr}"
 language="en-IN">
 {say_block(safe, escape_content=False)}
