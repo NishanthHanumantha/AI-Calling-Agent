@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SOBHA Townpark local call</title>
+  <style>
+    :root { color-scheme: light; }
+    body {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      background: #f4f1ea;
+      color: #1c1915;
+    }
+    main {
+      max-width: 40rem;
+      margin: 0 auto;
+      padding: 2rem 1.25rem 3rem;
+    }
+    h1 { font-size: 1.6rem; font-weight: 600; margin: 0 0 0.4rem; }
+    p { line-height: 1.45; }
+    .note {
+      background: #fff;
+      border: 1px solid #ddd6c8;
+      border-radius: 8px;
+      padding: 0.8rem 1rem;
+      font-family: "Segoe UI", sans-serif;
+      font-size: 0.92rem;
+    }
+    .controls { display: flex; gap: 0.6rem; margin: 1rem 0; }
+    button {
+      font: 600 1rem "Segoe UI", sans-serif;
+      border: 0;
+      border-radius: 999px;
+      padding: 0.7rem 1.2rem;
+      cursor: pointer;
+    }
+    #start { background: #1f4d3a; color: #fff; }
+    #hangup { background: #8c3a32; color: #fff; }
+    button:disabled { opacity: 0.45; cursor: default; }
+    #status { font-family: "Segoe UI", sans-serif; min-height: 1.4rem; }
+    #log {
+      list-style: none;
+      padding: 0;
+      margin: 1rem 0 0;
+    }
+    #log li {
+      background: #fff;
+      border-radius: 8px;
+      padding: 0.7rem 0.9rem;
+      margin-bottom: 0.5rem;
+    }
+    #log .who {
+      display: block;
+      font-family: "Segoe UI", sans-serif;
+      font-size: 0.75rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #6b645b;
+      margin-bottom: 0.2rem;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Local call</h1>
+    <p class="note">
+      This uses the same SOBHA Townpark conversation as the phone agent.
+      The microphone in this Cursor window is already allowed. Your speech is transcribed by Sarvam, and this browser speaks the reply.
+      Twilio and Polly Kajal-Neural are not used on this page.
+    </p>
+    <div class="controls">
+      <button id="start" type="button">Start call</button>
+      <button id="done" type="button" disabled>Done speaking</button>
+      <button id="hangup" type="button" disabled>Hang up</button>
+    </div>
+    <p id="status">Ready.</p>
+    <ul id="log"></ul>
+  </main>
+  <script>
+    const startBtn = document.getElementById("start");
+    const doneBtn = document.getElementById("done");
+    const hangupBtn = document.getElementById("hangup");
+    const statusEl = document.getElementById("status");
+    const logEl = document.getElementById("log");
+    let active = false;
+    let busy = false;
+    let capture = null;
+
+    function setStatus(text) { statusEl.textContent = text; }
+
+    function addLine(who, text) {
+      const item = document.createElement("li");
+      const label = document.createElement("span");
+      label.className = "who";
+      label.textContent = who;
+      item.append(label, document.createTextNode(text));
+      logEl.append(item);
+      item.scrollIntoView({ block: "nearest" });
+    }
+
+    function chooseVoice() {
+      const voices = speechSynthesis.getVoices();
+      return voices.find((voice) => voice.lang.toLowerCase() === "en-in")
+        || voices.find((voice) => voice.lang.toLowerCase().startsWith("en"))
+        || null;
+    }
+
+    function speak(text) {
+      return new Promise((resolve) => {
+        const utterance = new SpeechSynthesisUtterance(text);
+        const voice = chooseVoice();
+        if (voice) {
+          utterance.voice = voice;
+          utterance.lang = voice.lang;
+        } else {
+          utterance.lang = "en-IN";
+        }
+        utterance.onend = resolve;
+        utterance.onerror = resolve;
+        speechSynthesis.cancel();
+        speechSynthesis.speak(utterance);
+      });
+    }
+
+    function mergeSamples(parts) {
+      const length = parts.reduce((sum, part) => sum + part.length, 0);
+      const merged = new Float32Array(length);
+      let offset = 0;
+      parts.forEach((part) => {
+        merged.set(part, offset);
+        offset += part.length;
+      });
+      return merged;
+    }
+
+    function downsample(samples, fromRate, toRate) {
+      if (fromRate === toRate) return samples;
+      const ratio = fromRate / toRate;
+      const length = Math.floor(samples.length / ratio);
+      const result = new Float32Array(length);
+      for (let index = 0; index < length; index += 1) {
+        result[index] = samples[Math.floor(index * ratio)];
+      }
+      return result;
+    }
+
+    function encodeWav(samples, sampleRate) {
+      const buffer = new ArrayBuffer(44 + samples.length * 2);
+      const view = new DataView(buffer);
+      const write = (offset, text) => {
+        for (let index = 0; index < text.length; index += 1) {
+          view.setUint8(offset + index, text.charCodeAt(index));
+        }
+      };
+      write(0, "RIFF");
+      view.setUint32(4, 36 + samples.length * 2, true);
+      write(8, "WAVE");
+      write(12, "fmt ");
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      write(36, "data");
+      view.setUint32(40, samples.length * 2, true);
+      let offset = 44;
+      for (let index = 0; index < samples.length; index += 1, offset += 2) {
+        const sample = Math.max(-1, Math.min(1, samples[index]));
+        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      }
+      return new Blob([buffer], { type: "audio/wav" });
+    }
+
+    function releaseMic() {
+      if (!capture) return;
+      capture.processor.onaudioprocess = null;
+      capture.processor.disconnect();
+      capture.source.disconnect();
+      capture.mute.disconnect();
+      capture.context.close().catch(() => {});
+      capture.stream.getTracks().forEach((track) => track.stop());
+      clearTimeout(capture.maxTimer);
+      capture = null;
+      doneBtn.disabled = true;
+    }
+
+    function finishCapture() {
+      if (!capture) return null;
+      const current = capture;
+      releaseMic();
+      const merged = downsample(mergeSamples(current.parts), current.context.sampleRate, 16000);
+      if (!current.heardSpeech || merged.length < 16000 * 0.4) return null;
+      return encodeWav(merged, 16000);
+    }
+
+    async function listen() {
+      if (!active || busy || capture) return;
+      setStatus("Listening. Speak, then pause, or click Done speaking.");
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (error) {
+        endCall(error.name === "NotAllowedError"
+          ? "Microphone access is blocked for Cursor. In Windows, open Settings, Privacy and security, Microphone, and allow desktop apps."
+          : "The microphone could not be opened.");
+        return;
+      }
+      if (!active) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      const context = new AudioContext();
+      await context.resume();
+      const source = context.createMediaStreamSource(stream);
+      const processor = context.createScriptProcessor(4096, 1, 1);
+      const mute = context.createGain();
+      mute.gain.value = 0;
+      const parts = [];
+      capture = { context, source, processor, mute, stream, parts, heardSpeech: false, quietBuffers: 0, maxTimer: 0 };
+      processor.onaudioprocess = (event) => {
+        if (!capture || busy) return;
+        const channel = new Float32Array(event.inputBuffer.getChannelData(0));
+        parts.push(channel);
+        let sum = 0;
+        for (let index = 0; index < channel.length; index += 1) sum += channel[index] * channel[index];
+        const loud = Math.sqrt(sum / channel.length) > 0.015;
+        if (loud) {
+          capture.heardSpeech = true;
+          capture.quietBuffers = 0;
+          setStatus("Hearing you.");
+        } else if (capture.heardSpeech) {
+          capture.quietBuffers += 1;
+          if (capture.quietBuffers >= 12) {
+            const blob = finishCapture();
+            if (blob) {
+              busy = true;
+              sendAudio(blob).catch((error) => endCall(error.message));
+            } else if (active && !busy) listen();
+          }
+        }
+      };
+      source.connect(processor);
+      processor.connect(mute);
+      mute.connect(context.destination);
+      doneBtn.disabled = false;
+      capture.maxTimer = setTimeout(() => {
+        const blob = finishCapture();
+        if (blob) {
+          busy = true;
+          sendAudio(blob).catch((error) => endCall(error.message));
+        } else if (active && !busy) listen();
+      }, 20000);
+    }
+
+    async function sendAudio(blob) {
+      busy = true;
+      doneBtn.disabled = true;
+      setStatus("Transcribing.");
+      const body = new FormData();
+      body.append("file", blob, "speech.wav");
+      const response = await fetch("/local/listen", { method: "POST", body });
+      const data = await response.json();
+      busy = false;
+      if (!response.ok || data.error) {
+        setStatus(data.error || "Could not transcribe that. Please say it again.");
+        setTimeout(() => { if (active && !busy) listen(); }, 900);
+        return;
+      }
+      const text = (data.text || "").trim();
+      if (!text) {
+        setStatus("I did not catch that. Please say it again.");
+        setTimeout(() => { if (active && !busy) listen(); }, 600);
+        return;
+      }
+      addLine("You", text);
+      await agentTurn("/local/turn", { text });
+    }
+
+    async function agentTurn(url, body) {
+      busy = true;
+      finishCapture();
+      setStatus("Thinking.");
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : "{}"
+      });
+      if (!response.ok) throw new Error("The local call server did not answer.");
+      const data = await response.json();
+      if (data.reply) {
+        addLine("Agent", data.reply);
+        setStatus("Speaking.");
+        await speak(data.reply);
+      }
+      busy = false;
+      if (data.ended) {
+        endCall("Call ended.");
+        return;
+      }
+      listen();
+    }
+
+    function endCall(message) {
+      active = false;
+      busy = false;
+      speechSynthesis.cancel();
+      releaseMic();
+      startBtn.disabled = false;
+      doneBtn.disabled = true;
+      hangupBtn.disabled = true;
+      setStatus(message);
+    }
+
+    startBtn.addEventListener("click", async () => {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setStatus("This window cannot open the microphone.");
+        return;
+      }
+      logEl.replaceChildren();
+      active = true;
+      startBtn.disabled = true;
+      hangupBtn.disabled = false;
+      try {
+        await agentTurn("/local/start");
+      } catch (error) {
+        endCall(error.message);
+      }
+    });
+
+    doneBtn.addEventListener("click", () => {
+      const blob = finishCapture();
+      if (blob) {
+        busy = true;
+        sendAudio(blob).catch((error) => endCall(error.message));
+      } else if (active) {
+        setStatus("I did not catch that. Please say it again.");
+        listen();
+      }
+    });
+
+    hangupBtn.addEventListener("click", () => endCall("You hung up."));
+    speechSynthesis.onvoiceschanged = () => chooseVoice();
+  </script>
+</body>
+</html>

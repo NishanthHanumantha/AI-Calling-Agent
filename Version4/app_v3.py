@@ -70,6 +70,14 @@ PROJECT_KB = {
     "payment": "Flexible payment plans and home loan assistance are available",
 }
 
+# Brochure super-built-up sizes, one row per configuration, so a 3 BHK reply cannot borrow a 2 BHK size.
+UNIT_SIZES = {
+    "1 BHK": "1 BHK Luxe is 754 sq. ft.",
+    "2 BHK": "2 BHK Luxe is 1240 to 1248 sq. ft. 2 BHK Grande is 1337 to 1678 sq. ft.",
+    "3 BHK": "3 BHK Luxe is 1506 to 1514 sq. ft. 3 BHK Grande is 1842 to 2547 sq. ft.",
+    "4 BHK": "4 BHK Grande is 2203 to 2846 sq. ft.",
+}
+
 # =====================================================
 # MEMORY STORE
 # =====================================================
@@ -86,6 +94,10 @@ conversation_memory = {
     "slot_pick_retries": 0,
     "customer_locality": None,
     "customer_configuration": None,
+    "last_agent_question": None,
+    "configuration_asked": False,
+    "customer_variant": None,
+    "declined_topics": [],
 }
 
 # =====================================================
@@ -304,6 +316,15 @@ def correct_stt(user_text, stage=None):
         return original
 
     normalized = re.sub(r"\s+", " ", original.lower()).strip()
+    if re.search(r"\bgranded\b", normalized):
+        original = re.sub(r"(?i)\bgranded\b", "Grande", original)
+        normalized = normalized.replace("granded", "grande")
+
+    last_question = (conversation_memory.get("last_agent_question") or "").lower()
+    if re.match(r"^(configuration|configurations)\.?$", normalized) and re.search(
+        r"\b(configuration|luxe|grande|layout)\b", last_question
+    ):
+        return original
 
     for pattern, replacement in STT_MISHEAR_MAP.items():
         if re.match(pattern, normalized, flags=re.IGNORECASE):
@@ -313,6 +334,14 @@ def correct_stt(user_text, stage=None):
     # After the qualify prompt, a short topic label is usually a menu pick.
     # Do not rewrite an actual question or concern into that label.
     if stage in ("qualify", "answer_faq") and len(normalized.split()) <= 4:
+        if extract_configuration(original):
+            return original
+        if re.search(r"\b(luxe|grande)\b", normalized):
+            return original
+        if re.search(r"\b(size|range|luxe|grande|sq\. ft|square feet)\b", last_question) and re.search(
+            r"\d{3,4}|square|sq\.?\s*ft|luxe|grande", normalized
+        ):
+            return original
         if re.search(r"\b(what|how|why|when|where|who|offer|expensive|far|distance)\b|\?", normalized):
             return original
         for intent, keywords in INTENT_KEYWORDS.items():
@@ -338,6 +367,7 @@ def say_block(text, escape_content=True):
 
 def gather_block(prompt_text):
     """Gather with hints, en-IN, and timeouts that tolerate light background noise."""
+    remember_spoken(prompt_text)
     safe = escape_twiml(prompt_text)
     hints_attr = html.escape(SPEECH_HINTS, quote=True)
     return f"""
@@ -416,6 +446,13 @@ def kb_context_for_intent(intent):
         lines.insert(0, "Use location details for location questions.")
     elif intent == "floorplan":
         lines.insert(0, "Use configurations for layout and BHK questions.")
+        stated = conversation_memory.get("customer_configuration")
+        if stated in UNIT_SIZES:
+            lines.insert(
+                0,
+                "Use only these sizes for the stated configuration. "
+                f"{UNIT_SIZES[stated]}",
+            )
     return "\n".join(lines)
 
 
@@ -732,6 +769,29 @@ def generate_response(user_query, intent, brochure_context, top_score):
     if conversation_memory.get("customer_configuration"):
         known.append(f"Configuration already stated: {conversation_memory['customer_configuration']}")
     known_line = "\n".join(known) if known else "No locality or configuration has been stated yet."
+    last_question = conversation_memory.get("last_agent_question")
+    if last_question and answers_size_question(user_query):
+        continuation = (
+            f"You just asked: {last_question}\n"
+            "The customer is choosing one of those sizes. Confirm only that choice. "
+            "Do not mention price or payment plans."
+        )
+    elif last_question and declining_last_offer(user_query):
+        continuation = (
+            f"You just asked: {last_question}\n"
+            "The customer declined that. Acknowledge it and do not ask it again. "
+            "Do not offer a site visit."
+        )
+    elif last_question and answering_last_question(user_query):
+        continuation = (
+            f"You just asked: {last_question}\n"
+            "The customer is answering that question. "
+            "Give the detail that question offered. Do not ask it again."
+        )
+    elif last_question:
+        continuation = f"You just asked: {last_question}\nDo not ask that question again."
+    else:
+        continuation = "You have not asked a question yet."
 
     headers = {
         "Authorization": f"Bearer {SARVAM_API_KEY}",
@@ -753,6 +813,10 @@ def generate_response(user_query, intent, brochure_context, top_score):
         "SOBHA Townpark is already located near Electronic City on Hosur Road. "
         "Do not ask which Bengaluru area they want unless they raise a commute or location concern. "
         "If they have already stated a configuration, do not ask for BHK again. "
+        "If the customer is answering the question you just asked, continue that point. "
+        "Do not ask that question again. A later question must be a different point. "
+        "Use only the sizes listed for the configuration they already stated. "
+        "Do not mention price or payment plans unless the customer asked about price or payment. "
         "Do not give a generic amenities list unless they asked about amenities. "
         "Do not say 'certainly' or 'I would be happy to'. "
         "Use short spoken sentences, not a written paragraph. "
@@ -766,7 +830,8 @@ def generate_response(user_query, intent, brochure_context, top_score):
     user_prompt = (
         f"Customer said: {user_query}\n"
         f"Detected topic: {intent}\n"
-        f"{known_line}\n\n"
+        f"{known_line}\n"
+        f"{continuation}\n\n"
         f"{combined_context}\n\n"
         "Speak only the reply to this customer."
     )
@@ -814,7 +879,7 @@ def generate_response(user_query, intent, brochure_context, top_score):
             print("UNUSABLE MODEL REPLY -> SAFE FALLBACK")
             return safe_spoken_fallback(user_query, intent)
 
-        return cleaned_answer
+        return drop_unasked_payment(user_query, cleaned_answer)
 
     except Exception as exc:
         print("SARVAM ERROR:", str(exc))
@@ -848,6 +913,19 @@ def is_positive(text):
         contains_word(text_lower, word)
         for word in ["yes", "yeah", "sure", "ok", "okay", "fine", "great", "yep", "yup"]
     )
+
+
+def available_to_talk(text):
+    """Greeting replies that mean the customer can continue, without the word yes."""
+    text_lower = (text or "").lower()
+    if is_clear_negative(text_lower):
+        return False
+    phrases = (
+        "can speak", "can talk", "speak now", "talk now", "good time",
+        "go ahead", "i'm free", "im free", "i am free", "i'm available",
+        "i am available", "listening", "carry on", "go on",
+    )
+    return any(phrase in text_lower for phrase in phrases)
 
 
 def wants_site_visit(text):
@@ -957,14 +1035,126 @@ def note_customer_requirements(text):
     configuration = extract_configuration(text)
     if configuration:
         conversation_memory["customer_configuration"] = configuration
+    note_variant(text)
     locality = extract_locality(text)
     if locality:
         conversation_memory["customer_locality"] = locality
 
 
 CONFIGURATION_QUESTION = (
-    "This is regarding SOBHA Townpark. Are you mainly looking for a two or three BHK?"
+    "This is regarding SOBHA Townpark. "
+    "We have one, two, three, and four BHK homes. "
+    "Which configuration are you looking for?"
 )
+CONFIGURATION_FOLLOWUP = "One, two, three, or four BHK?"
+
+
+def remember_spoken(text):
+    """Keep the latest question only. This is not a transcript."""
+    questions = [part.strip() for part in re.findall(r"[^?]*\?", text or "") if part.strip()]
+    question = questions[-1] if questions else None
+    conversation_memory["last_agent_question"] = question
+    if question and re.search(r"which configuration|one, two, three", question, re.I):
+        conversation_memory["configuration_asked"] = True
+
+
+def is_short_continuation(text):
+    """Yes, okay, or a one-word reply to the question just asked."""
+    cleaned = re.sub(r"[^\w\s]", "", (text or "").lower()).strip()
+    if not cleaned or len(cleaned.split()) > 3 or is_clear_negative(cleaned):
+        return False
+    if cleaned in {
+        "yes", "yeah", "yep", "yup", "ok", "okay", "sure", "fine",
+        "yes please", "okay sure", "ok sure",
+    }:
+        return True
+    if cleaned in {"configuration", "configurations"}:
+        last_question = (conversation_memory.get("last_agent_question") or "").lower()
+        return re.search(r"\b(configuration|luxe|grande|layout)\b", last_question) is not None
+    return False
+
+
+def declining_last_offer(text):
+    """No to the question just asked. A visit question is handled by the visit stages."""
+    last_question = (conversation_memory.get("last_agent_question") or "").lower()
+    if not last_question or re.search(r"\b(visit|schedule)\b", last_question):
+        return False
+    return is_clear_negative(text)
+
+
+def answers_size_question(text):
+    """A size or variant reply belongs to the layout question, not a new price question."""
+    last_question = (conversation_memory.get("last_agent_question") or "").lower()
+    if not re.search(r"\b(size|sizes|range|luxe|grande|sq)\b", last_question):
+        return False
+    normalized = (text or "").lower().replace("granded", "grande")
+    return re.search(r"\b(luxe|grande|\d{3,4}|square|sq)\b", normalized) is not None
+
+
+def note_variant(text):
+    normalized = (text or "").lower().replace("granded", "grande")
+    if re.search(r"\bgrande\b", normalized):
+        conversation_memory["customer_variant"] = "Grande"
+    elif re.search(r"\bluxe\b", normalized):
+        conversation_memory["customer_variant"] = "Luxe"
+
+
+def drop_unasked_payment(user_query, answer):
+    """A size choice should not be turned into a payment pitch."""
+    if not answers_size_question(user_query):
+        return answer
+    if re.search(r"\b(price|payment|cost|crore)\b", (user_query or "").lower()):
+        return answer
+    sentences = re.findall(r"[^.?!]+[.?!]?", answer or "")
+    kept = [
+        sentence.strip()
+        for sentence in sentences
+        if sentence.strip() and not re.search(r"\b(payment|price|crore)\b", sentence, re.I)
+    ]
+    if kept:
+        return " ".join(kept)
+    variant = conversation_memory.get("customer_variant") or "selected"
+    config = conversation_memory.get("customer_configuration") or "home"
+    return f"That's the {variant} {config}. What else would you like to know about it?"
+
+
+def decline_followup():
+    """Leave the refused topic and ask what the customer wants next."""
+    last_question = (conversation_memory.get("last_agent_question") or "").lower()
+    topics = conversation_memory.setdefault("declined_topics", [])
+    if "payment" in last_question and "payment" not in topics:
+        topics.append("payment")
+    elif re.search(r"\b(price|pricing)\b", last_question) and "pricing" not in topics:
+        topics.append("pricing")
+    if re.search(r"what would you like to know", last_question):
+        return None
+    config = conversation_memory.get("customer_configuration") or "home"
+    variant = conversation_memory.get("customer_variant")
+    home = f"{variant} {config}".strip() if variant else config
+    if "payment" in topics:
+        return f"Alright, we'll leave the payment plans. What would you like to know about the {home}?"
+    if "pricing" in topics:
+        return "Understood. What else would you like to know about the home?"
+    return "Alright. What would you like to know next?"
+
+
+def answering_last_question(text):
+    if not conversation_memory.get("last_agent_question"):
+        return False
+    return is_short_continuation(text) or declining_last_offer(text) or answers_size_question(text)
+
+
+def turn_intent(user_text):
+    """A short reply keeps the topic of the question just asked."""
+    if answering_last_question(user_text) and conversation_memory.get("last_intent"):
+        return conversation_memory["last_intent"]
+    return detect_intent(user_text)
+
+
+def turn_query(user_text):
+    if answering_last_question(user_text):
+        return f"{conversation_memory.get('last_agent_question')} {user_text}"
+    return user_text
 
 
 def is_location_concern(text):
@@ -993,6 +1183,8 @@ def missing_requirement_question(text):
     ):
         return None
     if not conversation_memory.get("customer_configuration"):
+        if conversation_memory.get("configuration_asked") and is_short_continuation(text):
+            return CONFIGURATION_FOLLOWUP
         return CONFIGURATION_QUESTION
     return None
 
@@ -1039,14 +1231,18 @@ def reset_memory():
     conversation_memory["slot_pick_retries"] = 0
     conversation_memory["customer_locality"] = None
     conversation_memory["customer_configuration"] = None
+    conversation_memory["last_agent_question"] = None
+    conversation_memory["configuration_asked"] = False
+    conversation_memory["customer_variant"] = None
+    conversation_memory["declined_topics"] = []
 
 
 def answer_faq_and_prompt(user_text, nudge_visit=False):
     """Retrieve context and speak one grounded reply. Visit booking stays outside this text."""
     note_customer_requirements(user_text)
-    intent = detect_intent(user_text)
+    intent = turn_intent(user_text)
     conversation_memory["last_intent"] = intent
-    brochure_context, top_score = retrieve_context(intent, user_text)
+    brochure_context, top_score = retrieve_context(intent, turn_query(user_text))
     answer = generate_response(user_text, intent, brochure_context, top_score)
     conversation_memory["faq_count"] += 1
 
@@ -1163,7 +1359,11 @@ def empty_speech_fallback(stage):
         )
     elif stage == "qualify":
         if not conversation_memory.get("customer_configuration"):
-            prompt = sorry + CONFIGURATION_QUESTION
+            prompt = sorry + (
+                CONFIGURATION_FOLLOWUP
+                if conversation_memory.get("configuration_asked")
+                else CONFIGURATION_QUESTION
+            )
         else:
             prompt = sorry + "Could you please repeat that in a few simple words?"
     elif stage == "visit_day":
@@ -1250,7 +1450,7 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
     print("MEMORY:", conversation_memory)
 
     if stage == "greeting":
-        if is_positive(user_text):
+        if is_positive(user_text) or available_to_talk(user_text):
             conversation_memory["stage"] = "qualify"
             twiml = f"""
 <Response>
@@ -1327,6 +1527,19 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
             nudge = conversation_memory["faq_count"] >= MAX_FAQ_TURNS
             twiml = answer_faq_and_prompt(user_text, nudge_visit=nudge)
             return Response(content=twiml, media_type="application/xml")
+
+        if declining_last_offer(user_text):
+            reply = decline_followup()
+            if reply is None:
+                conversation_memory["stage"] = "closed"
+                return Response(
+                    content=polite_exit_twiml(
+                        "No problem. I can ask our team to share the project details with you. "
+                        "Thank you, and have a good day."
+                    ),
+                    media_type="application/xml",
+                )
+            return Response(content=qualification_twiml(reply), media_type="application/xml")
 
         if is_clear_negative(user_text):
             conversation_memory["stage"] = "propose_slot"

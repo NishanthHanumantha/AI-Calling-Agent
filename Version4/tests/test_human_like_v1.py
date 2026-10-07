@@ -73,6 +73,14 @@ REPLIES = {
         "Understood, you now want a 3 BHK. "
         "SOBHA Townpark has 3 BHK apartments. Should I stay with the 3 BHK?"
     ),
+    "Yes.": (
+        "The 3 BHK Luxe is 1506 to 1514 sq. ft., and the Grande is 1842 to 2547 sq. ft. "
+        "Would you like the starting price?"
+    ),
+    "Configuration.": (
+        "For the 3 BHK, Luxe is 1506 to 1514 sq. ft. and Grande is 1842 to 2547 sq. ft. "
+        "Which of those two should I stay with?"
+    ),
 }
 
 CALLS = []
@@ -378,7 +386,7 @@ def test_failed_distance_lookup_does_not_dump_amenities(monkeypatch):
         (
             "I'm not sure what I want.",
             "qualify",
-            ["two or three bhk"],
+            ["one, two, three, and four bhk"],
             "qualify",
             True,
             1,
@@ -502,7 +510,123 @@ def test_greeting_asks_configuration_not_area():
     spoken, _, stage = _turn("Yes, this is a good time.")
     assert stage == "qualify"
     assert "townpark" in spoken.lower()
-    assert "two or three bhk" in spoken.lower()
+    assert "one, two, three, and four bhk" in spoken.lower()
     assert "which area" not in spoken.lower()
     assert "amenities, pricing" not in spoken.lower()
     assert CALLS == []
+
+
+def test_greeting_accepts_available_without_yes():
+    app_v3.conversation_memory["stage"] = "greeting"
+    spoken, _, stage = _turn("I can speak now.")
+    assert stage == "qualify"
+    assert "one, two, three, and four bhk" in spoken.lower()
+    assert "lovely day" not in spoken.lower()
+    assert CALLS == []
+
+
+def test_greeting_still_closes_on_not_now():
+    app_v3.conversation_memory["stage"] = "greeting"
+    spoken, _, stage = _turn("Not now.")
+    assert stage == "closed"
+    assert "lovely day" in spoken.lower()
+
+
+def test_second_okay_narrows_the_bhk_question():
+    app_v3.conversation_memory["stage"] = "qualify"
+    app_v3.conversation_memory["configuration_asked"] = True
+    app_v3.conversation_memory["last_agent_question"] = (
+        "Are you mainly looking for a two or three BHK?"
+    )
+    spoken, _, stage = _turn("Okay.")
+    assert stage == "qualify"
+    assert spoken.strip() == "One, two, three, or four BHK?"
+    assert "this is regarding" not in spoken.lower()
+    assert CALLS == []
+
+
+def test_yes_continues_the_last_question():
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "customer_configuration": "3 BHK",
+        "last_intent": "floorplan",
+        "last_agent_question": "Would you prefer the Luxe or Grande configuration?",
+    })
+    _turn("Yes.")
+    user = CALLS[-1]["json"]["messages"][1]["content"]
+    system = CALLS[-1]["json"]["messages"][0]["content"]
+    assert "Would you prefer the Luxe or Grande configuration?" in user
+    assert "Customer said: Yes." in user
+    assert "Detected topic: floorplan" in user
+    assert "Use only these sizes for the stated configuration" in user
+    assert "3 BHK Luxe is 1506 to 1514" in user
+    assert "do not ask that question again" in system.lower()
+
+
+def test_bhk_choice_is_kept_and_not_asked_again():
+    app_v3.conversation_memory["stage"] = "qualify"
+    app_v3.conversation_memory["configuration_asked"] = True
+    app_v3.conversation_memory["last_agent_question"] = (
+        "Are you mainly looking for a two or three BHK?"
+    )
+    spoken, _, stage = _turn("3 BHK.")
+    assert app_v3.correct_stt("3 BHK.", stage="qualify") == "3 BHK."
+    assert app_v3.conversation_memory["customer_configuration"] == "3 BHK"
+    assert stage == "answer_faq"
+    assert "two or three" not in spoken.lower()
+    assert "Customer said: 3 BHK." in CALLS[-1]["json"]["messages"][1]["content"]
+
+
+def test_size_answer_is_not_rewritten_as_pricing():
+    app_v3.conversation_memory["last_agent_question"] = (
+        "Which of these size ranges interests you more?"
+    )
+    assert app_v3.correct_stt("1842 square feet.", stage="answer_faq") == "1842 square feet."
+
+
+def test_no_to_payment_does_not_start_a_visit():
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "customer_configuration": "3 BHK",
+        "customer_variant": "Grande",
+        "last_intent": "pricing",
+        "last_agent_question": "Would you like to know more about the payment options?",
+    })
+    spoken, _, stage = _turn("No.")
+    assert stage == "answer_faq"
+    assert "leave the payment plans" in spoken.lower()
+    assert "grande 3 bhk" in spoken.lower()
+    assert "1.8" not in spoken.lower()
+    assert "site visit" not in spoken.lower()
+    assert CALLS == []
+
+
+def test_size_choice_stays_on_the_layout():
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "customer_configuration": "3 BHK",
+        "last_intent": "floorplan",
+        "last_agent_question": "Which of these sizes works for you?",
+    })
+    _turn("Granded 1842 square feet.")
+    user = CALLS[-1]["json"]["messages"][1]["content"]
+    assert "Customer said: Grande 1842 square feet." in user
+    assert "Detected topic: floorplan" in user
+    assert "Do not mention price or payment plans." in user
+    assert app_v3.conversation_memory["customer_variant"] == "Grande"
+
+
+def test_configuration_reply_stays_on_the_layout_question():
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "customer_configuration": "3 BHK",
+        "last_intent": "floorplan",
+        "last_agent_question": "Would you prefer the Luxe or Grande configuration?",
+    })
+    assert app_v3.correct_stt("Configuration.", stage="answer_faq") == "Configuration."
+    _turn("Configuration.")
+    user = CALLS[-1]["json"]["messages"][1]["content"]
+    assert "Customer said: Configuration." in user
+    assert "Customer said: floor plan" not in user
+    assert "Detected topic: floorplan" in user
+    assert "3 BHK Grande is 1842 to 2547" in user
