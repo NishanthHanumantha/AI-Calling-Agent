@@ -421,6 +421,15 @@ def parse_bookable_slot(speech):
     return None
 
 
+def names_a_day(text):
+    """True when the customer named a visit day, not some other sentence."""
+    return re.search(
+        r"\b(today|tomorrow|weekend|weekends|weekday|weekdays|"
+        r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        (text or "").lower(),
+    ) is not None
+
+
 # =====================================================
 # PROJECT KB HELPERS
 # =====================================================
@@ -789,7 +798,11 @@ def generate_response(user_query, intent, brochure_context, top_score):
             "Give the detail that question offered. Do not ask it again."
         )
     elif last_question:
-        continuation = f"You just asked: {last_question}\nDo not ask that question again."
+        continuation = (
+            f"You just asked: {last_question}\n"
+            "Do not ask that question again, unless the customer asked you to wait. "
+            "If they asked you to wait, say you will wait and repeat only that question."
+        )
     else:
         continuation = "You have not asked a question yet."
 
@@ -807,6 +820,8 @@ def generate_response(user_query, intent, brochure_context, top_score):
         "A simple factual question can be only the answer. "
         "An objection needs acknowledgement, the grounded answer, and at most one question. "
         "If the customer needs time, acknowledge that and offer to share the available details. Do not push a site visit. "
+        "If the customer asks you to wait, say you will wait and repeat only the question you just asked. "
+        "Do not say goodbye and do not switch to the BHK menu. "
         "If they ask about an offer and the supplied information has no offer, say no confirmed offer is available. "
         "If a requested fact is not in the supplied information, say it is not confirmed. Do not guess. "
         "Do not invent discounts, launch offers, cashback, free parking, free registration, special prices, appreciation, or competitor comparisons. "
@@ -827,9 +842,11 @@ def generate_response(user_query, intent, brochure_context, top_score):
         "You cannot book a site visit. Do not say a visit is booked or confirmed."
     )
 
+    stage = conversation_memory.get("stage") or "greeting"
     user_prompt = (
         f"Customer said: {user_query}\n"
         f"Detected topic: {intent}\n"
+        f"Current stage: {stage}\n"
         f"{known_line}\n"
         f"{continuation}\n\n"
         f"{combined_context}\n\n"
@@ -1183,8 +1200,10 @@ def missing_requirement_question(text):
     ):
         return None
     if not conversation_memory.get("customer_configuration"):
-        if conversation_memory.get("configuration_asked") and is_short_continuation(text):
-            return CONFIGURATION_FOLLOWUP
+        if conversation_memory.get("configuration_asked"):
+            if is_short_continuation(text):
+                return CONFIGURATION_FOLLOWUP
+            return None
         return CONFIGURATION_QUESTION
     return None
 
@@ -1237,13 +1256,44 @@ def reset_memory():
     conversation_memory["declined_topics"] = []
 
 
-def answer_faq_and_prompt(user_text, nudge_visit=False):
-    """Retrieve context and speak one grounded reply. Visit booking stays outside this text."""
+def grounded_reply(user_text):
+    """One spoken answer from the customer's words. Does not change the stage."""
     note_customer_requirements(user_text)
     intent = turn_intent(user_text)
     conversation_memory["last_intent"] = intent
     brochure_context, top_score = retrieve_context(intent, turn_query(user_text))
-    answer = generate_response(user_text, intent, brochure_context, top_score)
+    return generate_response(user_text, intent, brochure_context, top_score)
+
+
+def answer_in_place(user_text):
+    """Speak that answer and keep listening on the current stage."""
+    return Response(
+        content=f"<Response>{gather_block(grounded_reply(user_text))}</Response>",
+        media_type="application/xml",
+    )
+
+
+def answer_then_ask(user_text, question):
+    """Answer what was said, then ask the stage question again."""
+    return Response(
+        content=f"""
+<Response>
+
+{say_block(grounded_reply(user_text))}
+
+<Pause length="1"/>
+
+{gather_block(question)}
+
+</Response>
+""",
+        media_type="application/xml",
+    )
+
+
+def answer_faq_and_prompt(user_text, nudge_visit=False):
+    """Retrieve context and speak one grounded reply. Visit booking stays outside this text."""
+    answer = grounded_reply(user_text)
     conversation_memory["faq_count"] += 1
 
     if nudge_visit:
@@ -1463,13 +1513,16 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
 """
             return Response(content=twiml, media_type="application/xml")
 
-        conversation_memory["stage"] = "closed"
-        return Response(
-            content=polite_exit_twiml(
-                "Alright, thanks for letting me know. Have a lovely day."
-            ),
-            media_type="application/xml",
-        )
+        if is_clear_negative(user_text):
+            conversation_memory["stage"] = "closed"
+            return Response(
+                content=polite_exit_twiml(
+                    "Alright, thanks for letting me know. Have a lovely day."
+                ),
+                media_type="application/xml",
+            )
+
+        return answer_in_place(user_text)
 
     if stage == "qualify":
         if needs_time(user_text):
@@ -1559,19 +1612,24 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
             twiml = answer_faq_and_prompt(user_text)
             return Response(content=twiml, media_type="application/xml")
 
-        conversation_memory["stage"] = "closed"
-        return Response(
-            content=polite_exit_twiml(
-                "Understood. I'll have our advisor share the latest information with you. "
-                "Thank you for your time. Have a great day."
-            ),
-            media_type="application/xml",
-        )
+        if is_clear_negative(user_text):
+            conversation_memory["stage"] = "closed"
+            return Response(
+                content=polite_exit_twiml(
+                    "Understood. I'll have our advisor share the latest information with you. "
+                    "Thank you for your time. Have a great day."
+                ),
+                media_type="application/xml",
+            )
+
+        return answer_in_place(user_text)
 
     if stage == "visit_day":
-        conversation_memory["visit_day"] = user_text.strip()
-        conversation_memory["stage"] = "visit_pick_slot"
-        return Response(content=visit_slot_choice_twiml(is_retry=False), media_type="application/xml")
+        if names_a_day(user_text):
+            conversation_memory["visit_day"] = user_text.strip()
+            conversation_memory["stage"] = "visit_pick_slot"
+            return Response(content=visit_slot_choice_twiml(is_retry=False), media_type="application/xml")
+        return answer_in_place(user_text)
 
     if stage == "visit_pick_slot":
         slot = parse_bookable_slot(user_text)
@@ -1591,7 +1649,10 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
                 ),
                 media_type="application/xml",
             )
-        return Response(content=visit_slot_choice_twiml(is_retry=True), media_type="application/xml")
+        return answer_then_ask(
+            user_text,
+            f"We have these slots — {VISIT_SLOTS_SPOKEN}. Which one works best for you?",
+        )
 
     conversation_memory["stage"] = "closed"
     return Response(

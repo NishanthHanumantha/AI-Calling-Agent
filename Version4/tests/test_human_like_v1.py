@@ -81,6 +81,9 @@ REPLIES = {
         "For the 3 BHK, Luxe is 1506 to 1514 sq. ft. and Grande is 1842 to 2547 sq. ft. "
         "Which of those two should I stay with?"
     ),
+    "One minute.": "Sure, I will wait. Is now still a good time?",
+    "Just one minute.": "Sure, I will wait.",
+    "Can I ask something?": "Yes, please go ahead.",
 }
 
 CALLS = []
@@ -530,6 +533,35 @@ def test_greeting_still_closes_on_not_now():
     spoken, _, stage = _turn("Not now.")
     assert stage == "closed"
     assert "lovely day" in spoken.lower()
+
+
+def test_greeting_answers_a_hold_and_stays_open():
+    app_v3.conversation_memory["stage"] = "greeting"
+    app_v3.conversation_memory["last_agent_question"] = "Is now a good time for a quick call?"
+    spoken, _, stage = _turn("One minute.")
+    assert stage == "greeting"
+    assert CALLS
+    assert "lovely day" not in spoken.lower()
+    assert "sure, i will wait" in spoken.lower()
+    system = CALLS[-1]["json"]["messages"][0]["content"]
+    user = CALLS[-1]["json"]["messages"][1]["content"]
+    assert "say you will wait" in system.lower()
+    assert "Current stage: greeting" in user
+
+
+def test_qualification_answers_a_hold_or_a_question():
+    for speech in ("Just one minute.", "Can I ask something?"):
+        app_v3.reset_memory()
+        CALLS.clear()
+        app_v3.conversation_memory.update({
+            "stage": "qualify",
+            "configuration_asked": True,
+            "last_agent_question": "Which configuration are you looking for?",
+        })
+        spoken, _, stage = _turn(speech)
+        assert stage == "answer_faq"
+        assert CALLS
+        assert "which configuration are you looking for" not in spoken.lower()
 
 
 def test_second_okay_narrows_the_bhk_question():

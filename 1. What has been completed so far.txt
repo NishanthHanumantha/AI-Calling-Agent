@@ -1,0 +1,188 @@
+The approach tried was to set up a separate live evaluation environment on AWS Lightsail, without disturbing the existing production AI Calling Agent.
+
+Created a separate FastAPI application on port 8001, while the production agent continues running on port 8000. The evaluation system was designed to make sequential calls using Sarvam, DeepSeek Flash, Claude Sonnet and Claude Opus, record the conversations, and evaluate their performance using our existing framework.
+
+The initial dry-run was successful after installing the required dependencies. However, during deployment, the evaluation app's /eval/status endpoint started returning an Internal Server Error (500), even though the server itself was running. We haven't yet identified the root cause, so the four live calls and recordings are still pending.
+
+Today's Tasks
+1.Built a localhost Cursor call that reuses the Townpark conversation, with Sarvam transcribing and the browser speaking.
+2.Tightened the conversation so a short reply stays on the last question, including configuration, size, and a declined topic.
+3.Recorded 6 voice conversations in the localhost Cursor call and used them to tighten short replies.
+
+
+1.Preserved the existing AI Calling Agent architecture and production flow while continuing development in the Version4 branch.
+2.Manually analysed multiple real-estate sales representative calls and identified the strongest call as a behavioural benchmark.
+3.Identified key human-like conversation patterns such as contextual responses, relevant follow-up questions, natural objection handling, and avoiding repetitive/canned responses.
+4.Implemented these conversational improvements in Version4 while retaining the existing STT, TTS, LLM, RAG, and site-visit flow in cursor. But yet to check if there is any improvement in actual call. 
+
+
+
+Today's Tasks:
+1.Filled enquiry forms for leading Bengaluru real-estate builders to initiate sales calls and collect interaction samples.
+2.Answered incoming sales calls and interacted with representatives across different project offerings and buyer scenarios.
+3.Recorded 12 sales call conversations and documented them for analysing human-like communication patterns and improving the AI Calling Agent.
+
+
+Today's Tasks
+1.Re-established the AI Calling Agent environment and validated the four-model LLM integration — Sarvam, DeepSeek Flash, Claude Sonnet 4.6, and Claude Opus 4.8.
+2.Switched the production-based evaluation copy from Sarvam to DeepSeek. Additional time was spent resolving provider/API configuration issues, including DeepSeek thinking-mode output and   Claude Opus temperature compatibility.
+3.Conducted live outbound call evaluations for DeepSeek Flash, Claude Sonnet 4.6, and Claude Opus 4.8 while monitoring live STT transcripts.
+4.Screen-recorded the model evaluation calls and observed STT transcription errors during live conversations for further STT improvement analysis.
+
+
+Provider	Indian English	Voice	Type	Gender
+Amazon Polly	en-IN	Kajal-Neural	Neural	Female
+Amazon Polly	en-IN	Aditi	Standard	Female
+Amazon Polly	en-IN	Kajal-Generative	Generative	Female
+Amazon Polly	en-IN	Raveena	Standard	Female
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Today's Tasks – AI Calling Agent Voice Evaluation
+
+1.Deployed and verified the isolated AI Calling Agent evaluation application on AWS Lightsail, running on 127.0.0.1:8001, while keeping the production application on port 8000 separate.
+
+2.Verified that the evaluation Uvicorn process is running and confirmed that the production service remains active.
+
+3.Investigated the evaluation endpoint failure: /eval/status returns HTTP 500 – Internal Server Error.
+
+4.Traced the error to LLM_Evaluation/live_voice/runtime.py, where get_runtime() raises RuntimeError: Live-voice eval runtime is not started; the call originates from twilio_app.py, line 49.
+
+5.Investigated service logs and process status. The Nginx error log is empty, and the evaluation service’s journalctl query returned no entries, so the next step is to verify the application’s startup/lifespan initialization and runtime setup.
+
+The evaluation server is running, but its runtime has not been initialized correctly. We need to identify why the startup process is not setting the runtime before the status endpoint is called. This application-lifecycle issue is the current blocker—not evidence of an Nginx failure. Once resolved, we can verify the endpoint and proceed with the live voice evaluation setup.
+
+
+
+
+
+
+
+
+1. What has been completed so far?
+
+1. Four-model evaluation framework
+
+Set up the evaluation to compare Sarvam Conversational, DeepSeek Flash, Claude Sonnet and Claude Opus using the same customer-call scenarios.
+
+2. Evaluation methodology and scoring
+
+Implemented evaluation of intent recognition, actions, factual accuracy, grounded responses, context retention and conversation-stage handling. An independent judge evaluates responses rather than relying on each candidate model’s own assessment.
+
+3. Voice-evaluation safeguards
+
+Added sequential call execution, recording/transcript tracking, a dry-run mode, and controls to continue, skip or abort between calls. A bounded subprocess supervisor and fallback response were also implemented to handle slow or unresponsive model calls.
+
+4. Local testing
+
+The targeted live-voice test suite passed 32 tests. A previous dry run showed all four candidates as available and confirmed that it would place zero Twilio calls.
+
+5. Isolated deployment design
+
+The evaluation service is designed to run separately on port 8001, while the existing production calling agent remains on port 8000. This avoids changing the working production call flow.
+
+Important status distinction: the 32 targeted tests have passed, but the full test suite needs a fresh run before the live campaign.
+
+2. What is happening on AWS right now?
+
+Based on your latest terminal screenshots:
+
+Nginx configuration corrected
+
+The earlier syntax error was resolved. sudo nginx -t now reports that the configuration test is successful.
+
+Passed
+
+Configuration backup created
+
+A backup of the original Nginx site configuration exists in sites-available.
+
+Done
+
+Evaluation service not yet running
+
+The latest port check shows port 8000 listening, but no service listening on port 8001.
+
+Pending
+
+Nginx reload and live-call validation
+
+The configuration has passed its syntax check, but we still need to start the evaluation service, reload Nginx at the right point, and verify the public evaluation route.
+
+Pending
+
+Production safety: The screenshots do not show an evaluation call being made or Nginx being reloaded. The next steps should preserve the current production route and verify the evaluation route independently.
+
+3. Why is this taking time?
+
+The work is more involved than simply sending the same prompt to four LLMs and comparing their text responses.
+
+A. This is a live voice evaluation, not just a text benchmark.
+Each model has to work within an actual call flow: customer speech, transcription, model response, spoken output and the next customer turn. A model can perform well in text but still introduce delays, misunderstand speech or disrupt the conversation sequence.
+
+B. The comparison needs to be fair and measurable.
+All four models need comparable scenarios, consistent evaluation criteria, traceable transcripts and recordings, and an independent judge. We also need to distinguish a genuine model error from a telephony, transcription or infrastructure issue.
+
+C. Live calls need reliability controls.
+A slow model response can leave the caller waiting. The evaluation therefore includes timeout handling, fallback responses, process cleanup and controls to avoid overlapping calls. The configured eight-second model-turn budget is an intended target, not a guarantee that every webhook will respond within eight seconds.
+
+D. Deployment must not disrupt the existing agent.
+The production system is already working. The evaluation service is being isolated on port 8001, with its own routes and a separate Nginx path. That adds deployment and verification work, but reduces the risk of affecting production.
+
+E. Each model needs actual live testing.
+We must confirm that the model responds correctly over the phone—not merely that its API is reachable—and then inspect the resulting calls before scaling up the evaluation.
+
+4. How much more time might be needed?
+
+My practical estimate, assuming the model credentials and Twilio setup are ready and no major deployment issue appears:
+
+Stage 1 — Finish deployment and verify routes
+
+Start the service on port 8001, validate its health and webhook routes, then apply and verify the Nginx change.
+
+~½–1 working day
+
+Stage 2 — Controlled live-call smoke tests
+
+Test the call flow, speech recognition, model responses, audio, recordings and error handling with a small number of calls.
+
+~½–1 working day
+
+Stage 3 — Run the comparison and prepare results
+
+Run the agreed scenarios across all four models, review failed or incomplete calls, calculate metrics and prepare the report.
+
+~1–2 working days
+
+Estimated remaining effort
+
+2–4 working days
+
+Planning estimate, not a committed deadline. Allow additional time if API access, telephony, webhook timing or deployment issues arise.
+
+I would communicate around 3 working days for a controlled evaluation and initial report, with a reasonable buffer of up to 4–5 working days if issues emerge. That estimate assumes a defined set of test scenarios and a limited campaign—not a large-scale statistical study.

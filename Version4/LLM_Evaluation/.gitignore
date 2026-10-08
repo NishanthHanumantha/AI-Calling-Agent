@@ -1,0 +1,14 @@
+.env
+__pycache__/
+.pytest_cache/
+pytest-cache-files-*/
+*.pyc
+output/runs/
+output/interactive_runs/**
+!output/interactive_runs/.gitkeep
+output/live_voice_runs/**
+!output/live_voice_runs/.gitkeep
+output/*.csv
+output/*.xlsx
+output/*.jsonl
+!output/.gitkeep

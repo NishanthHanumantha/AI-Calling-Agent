@@ -1,0 +1,36 @@
+C:\Users\nishanth.h\ai-calling-agent
+
+python -m LLM_Evaluation.interactive.cli --check-models
+
+python -m LLM_Evaluation.interactive.cli --mode outbound --opening fixed
+
+OR
+
+python -m LLM_Evaluation.interactive.cli --mode outbound
+
+
+/evaluate session
+/export
+
+
+Today's Tasks:
+1.Developed an isolated live voice evaluation system with timeout supervision for benchmarking four LLMs.
+
+2.Executed the full test suite and completed a four-model dry run with zero Twilio calls.
+
+3.Committed and pushed the evaluation implementation to GitHub - prepared for Lightsail deployment.
+
+Pending task's:
+Connect to Lightsail and inspect the existing Nginx configuration.
+
+Back up the configuration and deploy the evaluation service on port 8001.
+
+Configure and verify the isolated /eval/ webhooks.
+
+Run the four live calls and verify the recordings.
+
+
+Today's Tasks:
+1.Attempted to set up a separate AWS server for live voice evaluation of four LLMs; encountered an initialization issue that prevented the evaluation from proceeding.
+2.Updated REST API configuration and pre-call steps to improve the AI Calling Agent’s execution flow.
+3.Implemented voice and STT configuration improvements, including Twilio voice settings and Sarvam speech recognition updates; committed and pushed changes to GitHub.	

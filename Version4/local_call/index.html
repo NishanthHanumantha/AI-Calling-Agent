@@ -66,7 +66,8 @@
     <h1>Local call</h1>
     <p class="note">
       This uses the same SOBHA Townpark conversation as the phone agent.
-      The microphone in this Cursor window is already allowed. Your speech is transcribed by Sarvam, and this browser speaks the reply.
+      The microphone in this Cursor window is already allowed. Your speech is transcribed by Sarvam, and Neerja speaks the reply.
+      You can speak while she is talking. She stops and answers what you said.
       Twilio and Polly Kajal-Neural are not used on this page.
     </p>
     <div class="controls">
@@ -83,9 +84,15 @@
     const hangupBtn = document.getElementById("hangup");
     const statusEl = document.getElementById("status");
     const logEl = document.getElementById("log");
+    const MIC = {
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    };
     let active = false;
     let busy = false;
     let capture = null;
+    let currentAudio = null;
+    let liveSpeech = null;
+    let scoring = false;
 
     function setStatus(text) { statusEl.textContent = text; }
 
@@ -99,27 +106,89 @@
       item.scrollIntoView({ block: "nearest" });
     }
 
-    function chooseVoice() {
-      const voices = speechSynthesis.getVoices();
-      return voices.find((voice) => voice.lang.toLowerCase() === "en-in")
-        || voices.find((voice) => voice.lang.toLowerCase().startsWith("en"))
-        || null;
+    function spokenWords(text) {
+      return (text || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((word) => word.length > 1);
     }
 
-    function speak(text) {
+    function isEcho(transcript, line) {
+      const said = spokenWords(transcript);
+      const agent = new Set(spokenWords(line));
+      if (said.length < 3 || agent.size === 0) return false;
+      return said.every((word) => agent.has(word));
+    }
+
+    function levelOf(channel) {
+      let sum = 0;
+      for (let index = 0; index < channel.length; index += 1) sum += channel[index] * channel[index];
+      return Math.sqrt(sum / channel.length);
+    }
+
+    function dropPlayback(revoke) {
+      const session = liveSpeech;
+      liveSpeech = null;
+      if (session) {
+        session.audio.pause();
+        if (revoke) URL.revokeObjectURL(session.url);
+      }
+      if (!session || currentAudio === session.audio) currentAudio = null;
+      return session;
+    }
+
+    function playLine(text, existing) {
       return new Promise((resolve) => {
-        const utterance = new SpeechSynthesisUtterance(text);
-        const voice = chooseVoice();
-        if (voice) {
-          utterance.voice = voice;
-          utterance.lang = voice.lang;
-        } else {
-          utterance.lang = "en-IN";
+        let settled = false;
+        const finish = (outcome) => {
+          if (settled) return;
+          settled = true;
+          resolve(outcome);
+        };
+        const begin = (audio, url) => {
+          currentAudio = audio;
+          const session = { audio, url, line: text, finish, closed: false };
+          liveSpeech = session;
+          audio.onended = () => {
+            if (settled || liveSpeech !== session) return;
+            session.closed = true;
+            if (capture && capture.phase === "interrupt") releaseMic();
+            URL.revokeObjectURL(url);
+            if (currentAudio === audio) currentAudio = null;
+            liveSpeech = null;
+            finish("finished");
+          };
+          audio.onerror = () => {
+            if (settled) return;
+            URL.revokeObjectURL(url);
+            if (currentAudio === audio) currentAudio = null;
+            if (liveSpeech === session) liveSpeech = null;
+            finish("finished");
+          };
+          const started = audio.play();
+          const watch = () => armBargeIn(session);
+          const giveUp = () => {
+            session.closed = true;
+            URL.revokeObjectURL(url);
+            if (currentAudio === audio) currentAudio = null;
+            if (liveSpeech === session) liveSpeech = null;
+            finish("finished");
+          };
+          if (started && started.then) started.then(watch).catch(giveUp);
+          else watch();
+        };
+        if (existing) {
+          begin(existing.audio, existing.url);
+          return;
         }
-        utterance.onend = resolve;
-        utterance.onerror = resolve;
-        speechSynthesis.cancel();
-        speechSynthesis.speak(utterance);
+        fetch("/local/speak", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text })
+        }).then((response) => {
+          if (!response.ok) throw new Error("Neerja did not speak.");
+          return response.blob();
+        }).then((blob) => {
+          const url = URL.createObjectURL(blob);
+          begin(new Audio(url), url);
+        }).catch(() => finish("finished"));
       });
     }
 
@@ -196,63 +265,128 @@
       return encodeWav(merged, 16000);
     }
 
-    async function listen() {
-      if (!active || busy || capture) return;
-      setStatus("Listening. Speak, then pause, or click Done speaking.");
+    function armSilenceTimer() {
+      if (!capture || capture.maxTimer) return;
+      capture.maxTimer = setTimeout(() => {
+        const blob = finishCapture();
+        if (blob) {
+          busy = true;
+          sendAudio(blob).catch((error) => endCall(error.message));
+        } else if (active && !busy && !(liveSpeech && !liveSpeech.audio.paused)) listen();
+      }, 20000);
+    }
+
+    function takeCustomerTurn() {
+      const blob = finishCapture();
+      if (blob) {
+        busy = true;
+        sendAudio(blob).catch((error) => endCall(error.message));
+        return;
+      }
+      if (active && !busy) listen();
+    }
+
+    let openingMic = null;
+
+    async function openCapture(phase) {
+      if (!active || capture) return;
+      if (openingMic) {
+        await openingMic;
+        if (!active || capture) return;
+      }
+      let releaseWait = () => {};
+      openingMic = new Promise((resolve) => { releaseWait = resolve; });
       let stream;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch (error) {
-        endCall(error.name === "NotAllowedError"
-          ? "Microphone access is blocked for Cursor. In Windows, open Settings, Privacy and security, Microphone, and allow desktop apps."
-          : "The microphone could not be opened.");
-        return;
-      }
-      if (!active) {
-        stream.getTracks().forEach((track) => track.stop());
-        return;
-      }
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(MIC);
+        } catch (error) {
+          endCall(error.name === "NotAllowedError"
+            ? "Microphone access is blocked for Cursor. In Windows, open Settings, Privacy and security, Microphone, and allow desktop apps."
+            : "The microphone could not be opened.");
+          return;
+        }
+        if (!active) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
       const context = new AudioContext();
       await context.resume();
       const source = context.createMediaStreamSource(stream);
       const processor = context.createScriptProcessor(4096, 1, 1);
       const mute = context.createGain();
       mute.gain.value = 0;
-      const parts = [];
-      capture = { context, source, processor, mute, stream, parts, heardSpeech: false, quietBuffers: 0, maxTimer: 0 };
+      capture = {
+        context, source, processor, mute, stream,
+        parts: [], heardSpeech: false, quietBuffers: 0, loudBuffers: 0,
+        maxTimer: 0, phase, onInterrupt: null
+      };
       processor.onaudioprocess = (event) => {
         if (!capture || busy) return;
         const channel = new Float32Array(event.inputBuffer.getChannelData(0));
-        parts.push(channel);
-        let sum = 0;
-        for (let index = 0; index < channel.length; index += 1) sum += channel[index] * channel[index];
-        const loud = Math.sqrt(sum / channel.length) > 0.015;
-        if (loud) {
+        capture.parts.push(channel);
+        const level = levelOf(channel);
+        if (capture.phase === "interrupt") {
+          if (level > 0.04) {
+            capture.loudBuffers += 1;
+            if (capture.loudBuffers >= 3 && capture.onInterrupt) {
+              const notify = capture.onInterrupt;
+              capture.onInterrupt = null;
+              const kept = capture.parts.slice(-3);
+              capture.parts.length = 0;
+              kept.forEach((part) => capture.parts.push(part));
+              notify();
+            }
+          } else {
+            capture.loudBuffers = 0;
+          }
+          return;
+        }
+        if (level > 0.015) {
           capture.heardSpeech = true;
           capture.quietBuffers = 0;
           setStatus("Hearing you.");
         } else if (capture.heardSpeech) {
           capture.quietBuffers += 1;
-          if (capture.quietBuffers >= 12) {
-            const blob = finishCapture();
-            if (blob) {
-              busy = true;
-              sendAudio(blob).catch((error) => endCall(error.message));
-            } else if (active && !busy) listen();
-          }
+          if (capture.quietBuffers >= 12) takeCustomerTurn();
         }
       };
       source.connect(processor);
       processor.connect(mute);
       mute.connect(context.destination);
       doneBtn.disabled = false;
-      capture.maxTimer = setTimeout(() => {
-        const blob = finishCapture();
-        if (blob) {
-          busy = true;
-          sendAudio(blob).catch((error) => endCall(error.message));
-        } else if (active && !busy) listen();
-      }, 20000);
+      if (phase === "customer") armSilenceTimer();
+      } finally {
+        openingMic = null;
+        releaseWait();
+      }
+    }
+
+    async function armBargeIn(session) {
+      if (!active || !session || session.closed) return;
+      await openCapture("interrupt");
+      if (session.closed || liveSpeech !== session) {
+        if (capture && capture.phase === "interrupt") releaseMic();
+        return;
+      }
+      if (!capture) return;
+      capture.phase = "interrupt";
+      capture.onInterrupt = () => {
+        session.audio.pause();
+        capture.phase = "customer";
+        capture.heardSpeech = true;
+        capture.quietBuffers = 0;
+        capture.loudBuffers = 0;
+        setStatus("Hearing you.");
+        armSilenceTimer();
+        session.finish("interrupted");
+      };
+    }
+
+    async function listen() {
+      if (!active || busy || capture) return;
+      setStatus("Listening. Speak, then pause, or click Done speaking.");
+      await openCapture("customer");
     }
 
     async function sendAudio(blob) {
@@ -264,17 +398,27 @@
       const response = await fetch("/local/listen", { method: "POST", body });
       const data = await response.json();
       busy = false;
-      if (!response.ok || data.error) {
-        setStatus(data.error || "Could not transcribe that. Please say it again.");
-        setTimeout(() => { if (active && !busy) listen(); }, 900);
-        return;
-      }
       const text = (data.text || "").trim();
-      if (!text) {
+      const held = liveSpeech;
+      if (!response.ok || data.error || !text || (held && isEcho(text, held.line))) {
+        if (held && !held.audio.ended) {
+          setStatus("Speaking.");
+          const outcome = await playLine(held.line, held);
+          if (!active || outcome === "interrupted") return;
+          listen();
+          return;
+        }
+        if (held) dropPlayback(true);
+        if (!response.ok || data.error) {
+          setStatus(data.error || "Could not transcribe that. Please say it again.");
+          setTimeout(() => { if (active && !busy) listen(); }, 900);
+          return;
+        }
         setStatus("I did not catch that. Please say it again.");
         setTimeout(() => { if (active && !busy) listen(); }, 600);
         return;
       }
+      if (held) dropPlayback(true);
       addLine("You", text);
       await agentTurn("/local/turn", { text });
     }
@@ -282,6 +426,7 @@
     async function agentTurn(url, body) {
       busy = true;
       finishCapture();
+      dropPlayback(true);
       setStatus("Thinking.");
       const response = await fetch(url, {
         method: "POST",
@@ -293,7 +438,9 @@
       if (data.reply) {
         addLine("Agent", data.reply);
         setStatus("Speaking.");
-        await speak(data.reply);
+        busy = false;
+        const outcome = await playLine(data.reply);
+        if (!active || outcome === "interrupted") return;
       }
       busy = false;
       if (data.ended) {
@@ -303,15 +450,30 @@
       listen();
     }
 
-    function endCall(message) {
+    async function endCall(message) {
+      const shouldScore = active && !scoring;
       active = false;
       busy = false;
-      speechSynthesis.cancel();
+      dropPlayback(true);
       releaseMic();
       startBtn.disabled = false;
       doneBtn.disabled = true;
       hangupBtn.disabled = true;
-      setStatus(message);
+      if (!shouldScore) {
+        setStatus(message);
+        return;
+      }
+      scoring = true;
+      setStatus("Scoring this call.");
+      try {
+        const response = await fetch("/local/end", { method: "POST" });
+        const data = await response.json();
+        setStatus(data.scorecard ? message + " Scorecard saved." : message);
+      } catch (error) {
+        setStatus(message);
+      } finally {
+        scoring = false;
+      }
     }
 
     startBtn.addEventListener("click", async () => {
@@ -331,18 +493,25 @@
     });
 
     doneBtn.addEventListener("click", () => {
+      const session = liveSpeech;
+      const watching = capture && capture.phase === "interrupt";
       const blob = finishCapture();
       if (blob) {
         busy = true;
         sendAudio(blob).catch((error) => endCall(error.message));
-      } else if (active) {
+        return;
+      }
+      if (watching && session && !session.closed && !session.audio.paused && active) {
+        armBargeIn(session);
+        return;
+      }
+      if (active) {
         setStatus("I did not catch that. Please say it again.");
         listen();
       }
     });
 
     hangupBtn.addEventListener("click", () => endCall("You hung up."));
-    speechSynthesis.onvoiceschanged = () => chooseVoice();
   </script>
 </body>
 </html>

@@ -1,0 +1,143 @@
+{
+  "scale": {
+    "unique_evaluation_runs": 15,
+    "customer_turns": 131,
+    "model_turn_evaluations": 520,
+    "labelled_evaluations": 412,
+    "unlabelled_turns": 108,
+    "models_evaluated": 6,
+    "models": [
+      "Claude Opus 4.8",
+      "Claude Sonnet 4.6",
+      "DeepSeek V4.1 Flash",
+      "Sarvam 105B Conversations",
+      "Sarvam Flagship",
+      "claude-sonnet-4-20250514"
+    ],
+    "languages_evaluated": 4,
+    "languages": [
+      "English",
+      "Hindi",
+      "Kannada",
+      "Mixed"
+    ],
+    "evaluation_observations": 520,
+    "framework_tests": 149,
+    "date_start": "2026-09-18",
+    "date_end": "2026-09-23",
+    "inventory_run_count": 71,
+    "unique_run_ids": 71
+  },
+  "reconciliation": {
+    "overall": "PASS",
+    "checks": {
+      "run_count": "PASS",
+      "model_turn_count": "PASS",
+      "language_count": "PASS",
+      "token_reconciliation": "PASS",
+      "cost_reconciliation": "PASS",
+      "coverage_reconciliation": "PASS",
+      "english_benchmark_identifiable": "PASS",
+      "hindi_evidence_identifiable": "PASS",
+      "framework_excluded_from_model_trials": "PASS",
+      "no_duplicate_run_id": "PASS",
+      "no_duplicate_model_turns": "PASS"
+    },
+    "run_inventory_count": 71,
+    "unique_run_ids": 71,
+    "detailed_model_turns": 520,
+    "aggregate_model_turns": 520,
+    "english_controlled_run_ids": [
+      "20260918_071117",
+      "20260918_092924",
+      "20260918_093006",
+      "20260918_093501",
+      "20260923_084857"
+    ],
+    "hindi_run_ids": [
+      "20260923_100451",
+      "20260923_103454"
+    ],
+    "framework_run_count": 56
+  },
+  "models": [
+    {
+      "model": "Sarvam 105B Conversations",
+      "provider": "sarvam",
+      "n": 135,
+      "intent_accuracy": 0.8318,
+      "action_accuracy": 0.8037
+    },
+    {
+      "model": "Sarvam Flagship",
+      "provider": "sarvam",
+      "n": 30,
+      "intent_accuracy": 0.0333,
+      "action_accuracy": 0.0333
+    },
+    {
+      "model": "DeepSeek V4.1 Flash",
+      "provider": "deepseek",
+      "n": 95,
+      "intent_accuracy": 0.8657,
+      "action_accuracy": 0.9254
+    },
+    {
+      "model": "Claude Sonnet 4.6",
+      "provider": "claude",
+      "n": 125,
+      "intent_accuracy": 0.8351,
+      "action_accuracy": 0.8969
+    },
+    {
+      "model": "Claude Opus 4.8",
+      "provider": "claude",
+      "n": 125,
+      "intent_accuracy": 0.8701,
+      "action_accuracy": 0.9091
+    },
+    {
+      "model": "claude-sonnet-4-20250514",
+      "provider": "claude",
+      "n": 10,
+      "intent_accuracy": 0.0,
+      "action_accuracy": 0.0
+    }
+  ],
+  "languages": [
+    {
+      "language": "English",
+      "evaluation_runs": 11,
+      "customer_turns": 81,
+      "model_turn_evaluations": 366,
+      "models": "Claude Opus 4.8, Claude Sonnet 4.6, DeepSeek V4.1 Flash, Sarvam 105B Conversations, Sarvam Flagship, claude-sonnet-4-20250514",
+      "status": "Completed \u2014 controlled English benchmark present; exploratory English runs kept separate"
+    },
+    {
+      "language": "Hindi",
+      "evaluation_runs": 2,
+      "customer_turns": 16,
+      "model_turn_evaluations": 72,
+      "models": "Claude Opus 4.8, Claude Sonnet 4.6, DeepSeek V4.1 Flash, Sarvam 105B Conversations",
+      "status": "Partial \u2014 H01\u2013H08 sequence exists and is kept separate from later exploratory Hindi; not production-validated"
+    },
+    {
+      "language": "Kannada",
+      "evaluation_runs": 1,
+      "customer_turns": 8,
+      "model_turn_evaluations": 36,
+      "models": "Claude Opus 4.8, Claude Sonnet 4.6, DeepSeek V4.1 Flash, Sarvam 105B Conversations",
+      "status": "Partial \u2014 K01\u2013K08 interactive sequence exists; not production-validated"
+    },
+    {
+      "language": "Mixed",
+      "evaluation_runs": 5,
+      "customer_turns": 10,
+      "model_turn_evaluations": 46,
+      "models": "Claude Opus 4.8, Claude Sonnet 4.6, DeepSeek V4.1 Flash, Sarvam 105B Conversations, Sarvam Flagship, claude-sonnet-4-20250514",
+      "status": "Partial \u2014 limited mixed-language evidence (not production-validated)"
+    }
+  ],
+  "discovered_files": 355,
+  "pricing_note": "PRICING ASSUMPTIONS (not recovered from historical evaluation artifacts). LLM-only estimated cost. Excludes Twilio, STT, TTS, and Lightsail/infrastructure. No USD-INR FX rate is stored in project evidence; USD-priced models are not converted to INR."
+}

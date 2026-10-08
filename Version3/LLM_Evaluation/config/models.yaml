@@ -1,0 +1,132 @@
+eval_version: "1.1.0"
+dataset_version: "1.0.0"
+prompt_version: "1.0.0"
+timeout_seconds: 30
+temperature: 0.1
+max_tokens: 400
+max_retries: 2
+
+in_scope_providers:
+  - sarvam
+  - claude
+  - deepseek
+
+out_of_scope_providers:
+  - qwen
+
+# LLM-EVAL.1.1 batch benchmark. DeepSeek is not added here.
+active_model_aliases:
+  - sarvam_conversational
+  - sarvam_flagship
+  - claude_flagship
+  - claude_sonnet
+
+# LLM-EVAL.2 interactive lab. sarvam_flagship is not an interactive model.
+interactive_model_aliases:
+  - sarvam_conversational
+  - deepseek_flagship
+  - claude_sonnet
+  - claude_flagship
+
+allowed_intents:
+  - PROJECT_FAQ
+  - PRICE_QUERY
+  - LOCATION_QUERY
+  - CONFIG_QUERY
+  - AMENITIES_QUERY
+  - QUALIFICATION
+  - SITE_VISIT
+  - CONFIRMATION
+  - UNKNOWN
+  - CLARIFY
+  - GENERAL
+
+allowed_actions:
+  - ANSWER
+  - QUALIFY
+  - BOOK_VISIT
+  - CONFIRM_SLOT
+  - CLARIFY
+  - DECLINE_UNKNOWN
+
+models:
+  sarvam_conversational:
+    enabled: true
+    provider: sarvam
+    role: conversational
+    api_key_env: SARVAM_API_KEY
+    model_env: SARVAM_CONVERSATIONAL_MODEL
+    default_model: sarvam-105b-conversations
+    base_url_env: SARVAM_BASE_URL
+    default_base_url: https://api.sarvam.ai/v1/chat/completions
+
+  sarvam_flagship:
+    enabled: true
+    provider: sarvam
+    role: flagship
+    api_key_env: SARVAM_API_KEY
+    model_env: SARVAM_FLAGSHIP_MODEL
+    default_model: sarvam-105b
+    base_url_env: SARVAM_BASE_URL
+    default_base_url: https://api.sarvam.ai/v1/chat/completions
+
+  deepseek_flagship:
+    enabled: true
+    provider: deepseek
+    role: flagship
+    api_key_env: DEEPSEEK_API_KEY
+    model_env: DEEPSEEK_FLAGSHIP_MODEL
+    default_model: deepseek-flash
+    base_url_env: DEEPSEEK_BASE_URL
+    default_base_url: https://api.deepseek.com
+    thinking_mode_env: DEEPSEEK_THINKING_MODE
+    thinking_mode: disabled
+
+  claude_flagship:
+    enabled: true
+    provider: claude
+    role: flagship
+    api_key_env: ANTHROPIC_API_KEY
+    model_env: CLAUDE_FLAGSHIP_MODEL
+    default_model: claude-opus-4-8
+    base_url_env: ANTHROPIC_BASE_URL
+    default_base_url: https://api.anthropic.com/v1/messages
+    models_url: https://api.anthropic.com/v1/models
+
+  claude_sonnet:
+    enabled: true
+    provider: claude
+    role: general_purpose
+    api_key_env: ANTHROPIC_API_KEY
+    model_env: CLAUDE_SONNET_MODEL
+    default_model: claude-sonnet-4-6
+    base_url_env: ANTHROPIC_BASE_URL
+    default_base_url: https://api.anthropic.com/v1/messages
+    models_url: https://api.anthropic.com/v1/models
+
+  qwen:
+    enabled: false
+    provider: qwen
+    role: out_of_scope
+    api_key_env: QWEN_API_KEY
+    model_env: QWEN_MODEL
+    default_model: qwen-plus
+    base_url_env: QWEN_BASE_URL
+    default_base_url: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+
+# Independent live-voice judge. Not a candidate. Not in active_model_aliases
+# or interactive_model_aliases. Same-ID judging of a candidate is forbidden.
+live_voice:
+  judge:
+    provider: claude
+    provider_env: LIVE_EVAL_JUDGE_PROVIDER
+    api_key_env: LIVE_EVAL_JUDGE_API_KEY
+    fallback_api_key_env:
+      - JUDGE_API_KEY
+      - ANTHROPIC_API_KEY
+    model_env: LIVE_EVAL_JUDGE_MODEL
+    base_url_env: LIVE_EVAL_JUDGE_BASE_URL
+    default_base_url: https://api.anthropic.com/v1/messages
+    temperature: 0
+    max_tokens: 2000
+    timeout_seconds: 60
