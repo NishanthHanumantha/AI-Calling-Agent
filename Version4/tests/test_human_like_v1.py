@@ -84,6 +84,15 @@ REPLIES = {
     "One minute.": "Sure, I will wait. Is now still a good time?",
     "Just one minute.": "Sure, I will wait.",
     "Can I ask something?": "Yes, please go ahead.",
+    "I'm okay with anything.": (
+        "Since you are flexible, the 2 BHK Grande range gives more space. "
+        "Would you prefer the larger end of that range?"
+    ),
+    "Yes, that would be fine.": "Would the 1678 sq. ft. option suit your needs?",
+    "Not sure about it.": (
+        "The 2 BHK Grande range offers two well planned sizes. "
+        "Would you prefer the larger or the more compact option?"
+    ),
 }
 
 CALLS = []
@@ -631,6 +640,44 @@ def test_no_to_payment_does_not_start_a_visit():
     assert "1.8" not in spoken.lower()
     assert "site visit" not in spoken.lower()
     assert CALLS == []
+
+
+def test_flexible_yes_closes_the_size_and_the_next_reply_leaves_it():
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "customer_configuration": "2 BHK",
+        "last_intent": "floorplan",
+        "last_agent_question": "Which of these sizes suits you better?",
+        "last_spoken_reply": (
+            "We have 2 BHK options in Luxe and Grande. "
+            "The Luxe is 1240 to 1248 sq. ft. and the Grande is 1337 to 1678 sq. ft. "
+            "Which of these sizes suits you better?"
+        ),
+    })
+    _turn("I'm okay with anything.")
+    assert app_v3.conversation_memory["customer_variant"] == "Grande"
+    assert app_v3.conversation_memory["size_decided"] is True
+
+    spoken, _, stage = _turn("Yes, that would be fine.")
+    user = CALLS[-1]["json"]["messages"][1]["content"]
+    assert stage == "answer_faq"
+    assert "Size already chosen: Grande 2 BHK" in user
+    assert "one range, not two separate sizes" in user
+    assert "do not ask about size" in user.lower()
+    low = spoken.lower()
+    assert "1678" not in low
+    assert "larger" not in low
+    assert "layout" not in low
+    assert "sq" not in low
+    assert "what else would you like to know" in low
+
+    spoken, _, _ = _turn("Not sure about it.")
+    low = spoken.lower()
+    assert app_v3.conversation_memory["size_decided"] is True
+    assert "two well planned" not in low
+    assert "larger" not in low
+    assert "sq" not in low
+    assert "what else would you like to know" in low
 
 
 def test_size_choice_stays_on_the_layout():

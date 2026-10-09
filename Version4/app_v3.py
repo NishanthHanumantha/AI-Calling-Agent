@@ -97,6 +97,9 @@ conversation_memory = {
     "last_agent_question": None,
     "configuration_asked": False,
     "customer_variant": None,
+    "size_decided": False,
+    "size_closed_before_turn": False,
+    "last_spoken_reply": None,
     "declined_topics": [],
 }
 
@@ -777,9 +780,28 @@ def generate_response(user_query, intent, brochure_context, top_score):
         known.append(f"Locality already stated: {conversation_memory['customer_locality']}")
     if conversation_memory.get("customer_configuration"):
         known.append(f"Configuration already stated: {conversation_memory['customer_configuration']}")
+    if conversation_memory.get("size_decided") and conversation_memory.get("customer_variant"):
+        config = conversation_memory.get("customer_configuration") or "home"
+        variant = conversation_memory["customer_variant"]
+        size_line = UNIT_SIZES.get(config, "")
+        known.append(
+            f"Size already chosen: {variant} {config}. That choice is closed. {size_line} "
+            "This is one range, not two separate sizes."
+        )
     known_line = "\n".join(known) if known else "No locality or configuration has been stated yet."
     last_question = conversation_memory.get("last_agent_question")
-    if last_question and answers_size_question(user_query):
+    if (
+        conversation_memory.get("size_decided")
+        and conversation_memory.get("size_closed_before_turn")
+        and not customer_reopens_size(user_query)
+    ):
+        continuation = (
+            f"You just asked: {last_question}\n"
+            "The size is already decided. Do not ask about size, Luxe, Grande, layout, or square footage. "
+            "Do not describe the home as two sizes. "
+            "Acknowledge the customer and ask about a different point."
+        )
+    elif last_question and answers_size_question(user_query):
         continuation = (
             f"You just asked: {last_question}\n"
             "The customer is choosing one of those sizes. Confirm only that choice. "
@@ -831,6 +853,8 @@ def generate_response(user_query, intent, brochure_context, top_score):
         "If the customer is answering the question you just asked, continue that point. "
         "Do not ask that question again. A later question must be a different point. "
         "Use only the sizes listed for the configuration they already stated. "
+        "If a size has already been chosen, do not ask about size again. "
+        "Each Luxe or Grande line is one range, not two separate sizes. "
         "Do not mention price or payment plans unless the customer asked about price or payment. "
         "Do not give a generic amenities list unless they asked about amenities. "
         "Do not say 'certainly' or 'I would be happy to'. "
@@ -896,7 +920,7 @@ def generate_response(user_query, intent, brochure_context, top_score):
             print("UNUSABLE MODEL REPLY -> SAFE FALLBACK")
             return safe_spoken_fallback(user_query, intent)
 
-        return drop_unasked_payment(user_query, cleaned_answer)
+        return leave_closed_size(user_query, drop_unasked_payment(user_query, cleaned_answer))
 
     except Exception as exc:
         print("SARVAM ERROR:", str(exc))
@@ -1053,6 +1077,7 @@ def note_customer_requirements(text):
     if configuration:
         conversation_memory["customer_configuration"] = configuration
     note_variant(text)
+    accept_offered_size(text)
     locality = extract_locality(text)
     if locality:
         conversation_memory["customer_locality"] = locality
@@ -1068,6 +1093,7 @@ CONFIGURATION_FOLLOWUP = "One, two, three, or four BHK?"
 
 def remember_spoken(text):
     """Keep the latest question only. This is not a transcript."""
+    conversation_memory["last_spoken_reply"] = text
     questions = [part.strip() for part in re.findall(r"[^?]*\?", text or "") if part.strip()]
     question = questions[-1] if questions else None
     conversation_memory["last_agent_question"] = question
@@ -1114,6 +1140,148 @@ def note_variant(text):
         conversation_memory["customer_variant"] = "Grande"
     elif re.search(r"\bluxe\b", normalized):
         conversation_memory["customer_variant"] = "Luxe"
+
+
+def is_unsure(text):
+    """Hesitation. This is not a yes and not a new size choice."""
+    return re.search(
+        r"\b(not sure|unsure|don'?t know|do not know|not certain|no idea)\b",
+        (text or "").lower(),
+    ) is not None
+
+
+def is_flexible_about_size(text):
+    """The customer will take whichever size is offered."""
+    if is_unsure(text):
+        return False
+    return re.search(
+        r"\b(anything|either|any size|whatever|flexible|doesn'?t matter|dont matter|"
+        r"don'?t mind|do not mind|both are fine|either is fine)\b",
+        (text or "").lower(),
+    ) is not None
+
+
+def agrees_to_offered_size(text):
+    """Yes to the size just spoken. A choice between two names is not a yes to one of them."""
+    if is_unsure(text) or is_clear_negative(text) or is_flexible_about_size(text):
+        return False
+    if re.search(r"\b(i would like|tell me|what about|how about|know about)\b", (text or "").lower()):
+        return False
+    return is_positive(text)
+
+
+def _variant_alone(text):
+    low = (text or "").lower().replace("granded", "grande")
+    has_luxe = re.search(r"\bluxe\b", low) is not None
+    has_grande = re.search(r"\bgrande\b", low) is not None
+    if has_grande and not has_luxe:
+        return "Grande"
+    if has_luxe and not has_grande:
+        return "Luxe"
+    return None
+
+
+def larger_variant(config):
+    """The bigger named option in the stored size line."""
+    line = UNIT_SIZES.get(config) or ""
+    found = re.findall(r"\b(Luxe|Grande)\b[^.]{0,40}?(\d{3,4})", line)
+    if not found:
+        return None
+    return max(found, key=lambda item: int(item[1]))[0]
+
+
+def variant_for_number(config, number):
+    """Match a spoken square footage to Luxe or Grande."""
+    line = UNIT_SIZES.get(config) or ""
+    current = None
+    for part in re.split(r"\b(Luxe|Grande)\b", line):
+        if part in ("Luxe", "Grande"):
+            current = part
+        elif current and number in re.findall(r"\d{3,4}", part):
+            return current
+    return None
+
+
+def single_offered_variant():
+    """The one size named in the last reply. Both names means the customer still has to choose."""
+    question = conversation_memory.get("last_agent_question") or ""
+    reply = conversation_memory.get("last_spoken_reply") or ""
+    for text in (question, reply):
+        named = _variant_alone(text)
+        if named:
+            return named
+    config = conversation_memory.get("customer_configuration")
+    number = re.search(r"\b(\d{3,4})\b", question)
+    if number:
+        return variant_for_number(config, number.group(1))
+    if re.search(r"\blarger\b", question, re.I):
+        return conversation_memory.get("customer_variant") or larger_variant(config)
+    return None
+
+
+def size_topic_open():
+    topic = " ".join(
+        part for part in (
+            conversation_memory.get("last_spoken_reply") or "",
+            conversation_memory.get("last_agent_question") or "",
+        ) if part
+    )
+    return re.search(r"\b(size|sizes|range|luxe|grande|sq|layout|square)\b", topic, re.I) is not None
+
+
+def customer_reopens_size(text):
+    """A new size question. Agreement, flexibility, and 'not sure' do not reopen it."""
+    if is_unsure(text) or is_flexible_about_size(text) or agrees_to_offered_size(text):
+        return False
+    return re.search(
+        r"\b(size|sizes|luxe|grande|sq|square|layout|how big)\b",
+        (text or "").lower(),
+    ) is not None
+
+
+def accept_offered_size(text):
+    """Store a size the customer accepted, including a yes to the size just offered."""
+    if not size_topic_open() or is_unsure(text):
+        return
+    config = conversation_memory.get("customer_configuration")
+    if is_flexible_about_size(text):
+        variant = _variant_alone(conversation_memory.get("last_spoken_reply") or "") or larger_variant(config)
+        if variant:
+            conversation_memory["customer_variant"] = variant
+            conversation_memory["size_decided"] = True
+        return
+    if answers_size_question(text) and conversation_memory.get("customer_variant"):
+        conversation_memory["size_decided"] = True
+        return
+    if agrees_to_offered_size(text):
+        variant = single_offered_variant()
+        if variant:
+            conversation_memory["customer_variant"] = variant
+            conversation_memory["size_decided"] = True
+
+
+def reply_asks_about_size(answer):
+    if "?" not in (answer or ""):
+        return False
+    return re.search(
+        r"\b(size|sizes|luxe|grande|sq\.?\s*ft|square|layout|larger|compact|which of these)\b",
+        answer,
+        re.I,
+    ) is not None
+
+
+def leave_closed_size(user_query, answer):
+    """Once a size is stored, a later reply must not ask about size again."""
+    if not (
+        conversation_memory.get("size_decided")
+        and conversation_memory.get("size_closed_before_turn")
+        and not customer_reopens_size(user_query)
+        and reply_asks_about_size(answer)
+    ):
+        return answer
+    variant = conversation_memory.get("customer_variant") or "selected"
+    config = conversation_memory.get("customer_configuration") or "home"
+    return f"The {variant} {config} is noted. What else would you like to know about it?"
 
 
 def drop_unasked_payment(user_query, answer):
@@ -1253,6 +1421,9 @@ def reset_memory():
     conversation_memory["last_agent_question"] = None
     conversation_memory["configuration_asked"] = False
     conversation_memory["customer_variant"] = None
+    conversation_memory["size_decided"] = False
+    conversation_memory["size_closed_before_turn"] = False
+    conversation_memory["last_spoken_reply"] = None
     conversation_memory["declined_topics"] = []
 
 
@@ -1493,6 +1664,7 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
 
     conversation_memory["empty_retry_count"] = 0
     user_text = correct_stt(raw_text, stage=stage)
+    conversation_memory["size_closed_before_turn"] = bool(conversation_memory.get("size_decided"))
 
     print("=" * 50)
     print("CUSTOMER SAID (raw):", raw_text)

@@ -5,6 +5,13 @@ Created a separate FastAPI application on port 8001, while the production agent 
 The initial dry-run was successful after installing the required dependencies. However, during deployment, the evaluation app's /eval/status endpoint started returning an Internal Server Error (500), even though the server itself was running. We haven't yet identified the root cause, so the four live calls and recordings are still pending.
 
 Today's Tasks
+1.Developed a full-call evaluation agent for the Version4 localhost call, with measured scores and a written scorecard.
+2.Compared the best Claude models and selected Opus 5.5 as the call judge.
+3.Ran trial localhost calls to check the evaluation agent and review the scorecards.
+4.Improved customer interruption handling so the agent stops, listens, and answers when the customer speaks over it.
+5.Downloaded the required package and changed the localhost speech voice to Neerja.
+
+
 1.Built a localhost Cursor call that reuses the Townpark conversation, with Sarvam transcribing and the browser speaking.
 2.Tightened the conversation so a short reply stays on the last question, including configuration, size, and a declined topic.
 3.Recorded 6 voice conversations in the localhost Cursor call and used them to tighten short replies.
