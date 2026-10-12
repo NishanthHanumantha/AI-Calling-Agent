@@ -1,8 +1,14 @@
 # Version baseline
 
-Version: V3 frozen / V4 development
+Version: V4 frozen / V5 development
 
-Baseline purpose: `Version3/` is the frozen working baseline. `Version4/` is the independent development copy for Human-Like Conversation Improvements. Future changes belong only in `Version4/`. Do not modify `Version3/`.
+`Version4/` is frozen as of 12 October 2026. It keeps the localhost architecture already in this folder: Sarvam as the caller, Sarvam speech-to-text, Neerja through Edge for the spoken reply, and the Opus 5.5 scorecard. Do not modify `Version4/` or `Version3/`. Speech trials with Sarvam Bulbul belong in `Version5/`.
+
+The notes below record how Version 4 was built. They are historical.
+
+Version at the time of those notes: V3 frozen / V4 development
+
+Baseline purpose: `Version3/` is the frozen working baseline. `Version4/` was the independent development copy for Human-Like Conversation Improvements.
 
 This file records the project as inspected on 5 October 2026, then the confirmed live speech settings synchronized into Version 4. Those settings are configuration and integration choices. The model was not fine-tuned.
 

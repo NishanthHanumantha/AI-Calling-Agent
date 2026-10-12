@@ -5,6 +5,11 @@ Created a separate FastAPI application on port 8001, while the production agent 
 The initial dry-run was successful after installing the required dependencies. However, during deployment, the evaluation app's /eval/status endpoint started returning an Internal Server Error (500), even though the server itself was running. We haven't yet identified the root cause, so the four live calls and recordings are still pending.
 
 Today's Tasks
+1.Prepared the development summary report and presentation.
+2.Found and Compressed the good, average, and bad call recordings and shared it through google sheet.
+3.Found why the latest call stalled on apartment size, and stored an accepted size so the call moves on. Tried to fix this but haven't fixed it yet. 
+
+
 1.Developed a full-call evaluation agent for the Version4 localhost call, with measured scores and a written scorecard.
 2.Compared the best Claude models and selected Opus 5.5 as the call judge.
 3.Ran trial localhost calls to check the evaluation agent and review the scorecards.

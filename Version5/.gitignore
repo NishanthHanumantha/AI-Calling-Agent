@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+venv/
+local_call/runs/*
+!local_call/runs/.gitkeep
