@@ -50,6 +50,14 @@ Criteria, each pass 1 or fail 0:
 - multiple_followups: 1 means no reply asked more than one question
 - fixed_configuration_line: 1 means the configuration menu was not repeated after the customer declined to choose
 
+Leaving configuration, size, or budget open is correct when the customer has not decided. Do not fail context_retention, repeated_question, or fixed_configuration_line on the turn that acknowledges this and asks something else. Cite only the later turn that asks the topic again, not the first time it was asked.
+The stage answer_faq is used while the agent is still qualifying after an open answer. Do not fail conversation_stage_accuracy because that label is not qualify.
+Offering location after the greeting already stated Electronic City or Hosur Road fails on that later turn.
+Different wording of the configuration menu is the same question. "Available configurations" after the customer left configuration open fails fixed_configuration_line and repeated_question on that later turn only.
+"Not interested in that" or "not interested in it" declines the last topic. Closing the call on that line fails intent_accuracy and action_accuracy. A bare "I'm not interested," with no "that" or "it," may still close the call.
+A repeated question is the same topic asked again. A new question, such as a layout question after the kind of home, is not a repeated question merely because the customer said the agent was repeating.
+A no to configuration or size alone may still be followed by one site-visit offer. Do not fail premature_site_visit for that single offer. A no to the project, "I will let you know later" about the visit, or "I don't need any details" must close with no further question. Asking again fails action_accuracy and conversation_quality. A yes to highlights or documents is not a yes to a visit. Booking a day after that yes fails action_accuracy and premature_site_visit.
+
 Return JSON only:
 {
   "summary": "one paragraph",

@@ -101,6 +101,10 @@ conversation_memory = {
     "size_closed_before_turn": False,
     "last_spoken_reply": None,
     "declined_topics": [],
+    "covered_topics": [],
+    "open_topics": [],
+    "customer_purpose": None,
+    "visit_offered": False,
 }
 
 # =====================================================
@@ -390,9 +394,7 @@ language="en-IN">
 
 def visit_schedule_question():
     """Single wording for 'would you like to schedule a visit' (avoid asking twice)."""
-    return (
-        "Would you like to schedule a site visit to SOBHA Townpark? Please say yes or no."
-    )
+    return "Would you like to schedule a site visit to SOBHA Townpark?"
 
 
 def parse_bookable_slot(speech):
@@ -464,6 +466,12 @@ def kb_context_for_intent(intent):
                 0,
                 "Use only these sizes for the stated configuration. "
                 f"{UNIT_SIZES[stated]}",
+            )
+        else:
+            lines.insert(
+                0,
+                "Use only these sizes, and do not swap Luxe and Grande. "
+                + " ".join(UNIT_SIZES[key] for key in ("1 BHK", "2 BHK", "3 BHK", "4 BHK")),
             )
     return "\n".join(lines)
 
@@ -678,7 +686,31 @@ def clean_response(text):
     if any(phrase in text_lower for phrase in bad_phrases):
         return None
 
-    return text[:320].strip()
+    return text.strip()
+
+
+def fit_spoken_length(text, limit=320):
+    """Keep whole sentences. A limit must not stop in the middle of a word or a question."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    kept = []
+    total = 0
+    for sentence in split_sentences(text):
+        extra = len(sentence) + (1 if kept else 0)
+        if total + extra > limit:
+            break
+        kept.append(sentence)
+        total += extra
+    if kept:
+        return " ".join(kept)
+    words = []
+    for word in text.split():
+        candidate = " ".join(words + [word])
+        if len(candidate) > limit:
+            break
+        words.append(word)
+    return " ".join(words).rstrip(",;:—-")
 
 
 def fallback_response(intent):
@@ -780,6 +812,8 @@ def generate_response(user_query, intent, brochure_context, top_score):
         known.append(f"Locality already stated: {conversation_memory['customer_locality']}")
     if conversation_memory.get("customer_configuration"):
         known.append(f"Configuration already stated: {conversation_memory['customer_configuration']}")
+    elif "configuration" in (conversation_memory.get("open_topics") or []):
+        known.append("Configuration was left open. Do not ask which BHK again.")
     if conversation_memory.get("size_decided") and conversation_memory.get("customer_variant"):
         config = conversation_memory.get("customer_configuration") or "home"
         variant = conversation_memory["customer_variant"]
@@ -788,6 +822,10 @@ def generate_response(user_query, intent, brochure_context, top_score):
             f"Size already chosen: {variant} {config}. That choice is closed. {size_line} "
             "This is one range, not two separate sizes."
         )
+    elif "size" in (conversation_memory.get("open_topics") or []):
+        known.append("Size was left open. Do not ask about size, Luxe, Grande, or square footage again.")
+    if "budget" in (conversation_memory.get("open_topics") or []):
+        known.append("Budget was left open. Do not ask about budget or price.")
     known_line = "\n".join(known) if known else "No locality or configuration has been stated yet."
     last_question = conversation_memory.get("last_agent_question")
     if (
@@ -910,7 +948,6 @@ def generate_response(user_query, intent, brochure_context, top_score):
         print("RAW ANSWER PREVIEW:", raw_answer[:500])
 
         cleaned_answer = clean_response(raw_answer)
-        cleaned_answer = limit_to_one_question(cleaned_answer) if cleaned_answer else None
 
         if (
             not cleaned_answer
@@ -920,7 +957,16 @@ def generate_response(user_query, intent, brochure_context, top_score):
             print("UNUSABLE MODEL REPLY -> SAFE FALLBACK")
             return safe_spoken_fallback(user_query, intent)
 
-        return leave_closed_size(user_query, drop_unasked_payment(user_query, cleaned_answer))
+        spoken = leave_closed_size(user_query, drop_unasked_payment(user_query, cleaned_answer))
+        spoken = drop_unsupported_percent(spoken)
+        spoken = leave_closed_configuration(user_query, spoken)
+        spoken = drop_false_configuration_claim(spoken)
+        spoken = leave_blocked_topics(spoken)
+        spoken = drop_question_just_answered(spoken)
+        spoken = use_unit_sizes(user_query, spoken)
+        spoken = limit_to_one_question(spoken) if spoken else ""
+        spoken = fit_spoken_length(spoken) if spoken else ""
+        return spoken or move_on_line()
 
     except Exception as exc:
         print("SARVAM ERROR:", str(exc))
@@ -943,9 +989,24 @@ def is_clear_negative(text):
     return any(phrase in text_lower for phrase in negative_phrases)
 
 
+def is_not_interested(text):
+    """The customer is declining the project, not asking to book a visit."""
+    return re.search(r"\bnot interested\b", (text or "").lower()) is not None
+
+
+def is_bare_okay(text):
+    """A bare okay is not consent to book a visit."""
+    cleaned = re.sub(r"[^\w\s]", "", (text or "").lower()).strip()
+    return cleaned in {
+        "ok", "okay", "ah okay", "ah ok", "okay okay", "ok ok", "ok okay", "okay ok",
+    }
+
+
 def is_positive(text):
     """Detect whether the customer gave a positive response."""
     text_lower = text.lower()
+    if is_unsure(text_lower) or is_flexible_about_size(text_lower):
+        return False
     if is_clear_negative(text_lower):
         return False
     if re.search(r"\b(i would like|tell me|what about|how about|know about)\b", text_lower):
@@ -1022,6 +1083,70 @@ def needs_time(text):
     return any(clue in text_lower for clue in clues)
 
 
+ADVISOR_CLOSE = "I will have our sales advisor get in touch with you. Have a good day."
+SHARE_CLOSE = "I will arrange to share the details of the project with you. Have a good day."
+
+
+def refuses_details(text):
+    """The customer does not want documents or any further project details."""
+    return re.search(
+        r"\b(don'?t need|do not need|no need|not need).{0,24}\bdetails\b|\bno details\b",
+        (text or "").lower(),
+    ) is not None
+
+
+def defers_the_visit(text):
+    """The customer is putting the visit off, not asking for another topic."""
+    return re.search(
+        r"\b(let you know later|let me know later|i'?ll let you know|i will let you know)\b",
+        (text or "").lower(),
+    ) is not None
+
+
+def has_not_finalized(text):
+    """The customer has not settled the fact just asked."""
+    return re.search(
+        r"\b(haven'?t finalized|not finalized|yet to finalize)\b",
+        (text or "").lower(),
+    ) is not None
+
+
+def is_good_for_now(text):
+    """The customer is finished with the current topic, not necessarily the project."""
+    return re.search(
+        r"\b(i'm good|im good|i am good|good for now|all good)\b",
+        (text or "").lower(),
+    ) is not None
+
+
+def finished_this_topic(text):
+    return is_done_with_questions(text) or is_good_for_now(text)
+
+
+def last_question_is_visit():
+    """A yes books a day only when the question just asked was the visit."""
+    last = (conversation_memory.get("last_agent_question") or "").lower()
+    return re.search(r"\b(visit|schedule|which day|what time)\b", last) is not None
+
+
+def last_question_offers_materials():
+    """Highlights, documents, or details are not a visit question."""
+    last = (conversation_memory.get("last_agent_question") or "").lower()
+    if re.search(r"\b(visit|schedule|which day)\b", last):
+        return False
+    return re.search(
+        r"\b(highlights|documents?|brochure|details|share)\b",
+        last,
+    ) is not None
+
+
+def agrees_to_materials(text):
+    return re.search(
+        r"\b(share|send|documents?|brochure|highlights|details)\b",
+        (text or "").lower(),
+    ) is not None
+
+
 def is_direct_project_question(text):
     """A specific project question should be answered, not replaced by qualification."""
     text_lower = (text or "").lower()
@@ -1040,19 +1165,31 @@ def is_purpose_statement(text):
 
 def extract_configuration(text):
     """Pull a BHK requirement from the current utterance. Returns a short label or None."""
-    match = re.search(
-        r"\b([1-4]|one|two|three|four)\s*-?\s*(?:bhk|bedroom)",
-        (text or "").lower(),
-    )
-    if not match:
-        return None
     labels = {
         "1": "1 BHK", "one": "1 BHK",
         "2": "2 BHK", "two": "2 BHK",
         "3": "3 BHK", "three": "3 BHK",
         "4": "4 BHK", "four": "4 BHK",
     }
-    return labels.get(match.group(1))
+    match = re.search(
+        r"\b([1-4]|one|two|three|four)\s*-?\s*(?:bhk|bedroom)",
+        (text or "").lower(),
+    )
+    if match:
+        return labels.get(match.group(1))
+    last = (conversation_memory.get("last_agent_question") or "").lower()
+    if not re.search(r"\b(configuration|bhk|bedroom)\b", last):
+        return None
+    low = (text or "").lower()
+    if re.search(r"\b(minute|second|moment|wait|hour)\b", low):
+        return None
+    words = re.findall(r"[a-z0-9]+", low)
+    if not words or len(words) > 4:
+        return None
+    numbers = [word for word in words if word in labels]
+    if len(numbers) != 1:
+        return None
+    return labels[numbers[0]]
 
 
 def extract_locality(text):
@@ -1071,13 +1208,52 @@ def extract_locality(text):
     return None
 
 
+def note_purpose(text):
+    """Remember a purpose the customer actually stated."""
+    low = (text or "").lower()
+    if re.search(r"\binvestment\b", low):
+        conversation_memory["customer_purpose"] = "investment"
+    elif re.search(r"\b(own use|end use|to live|live in)\b", low):
+        conversation_memory["customer_purpose"] = "live"
+    if conversation_memory.get("customer_purpose"):
+        close_open_topic("purpose")
+
+
+def close_open_topic(topic):
+    topics = conversation_memory.setdefault("open_topics", [])
+    if topic in topics:
+        topics.remove(topic)
+
+
+def remember_open(topic):
+    topics = conversation_memory.setdefault("open_topics", [])
+    if topic not in topics:
+        topics.append(topic)
+    if topic == "configuration":
+        conversation_memory["configuration_asked"] = True
+
+
+def remember_covered(topic):
+    topics = conversation_memory.setdefault("covered_topics", [])
+    if topic not in topics:
+        topics.append(topic)
+
+
+def remember_declined(topic):
+    topics = conversation_memory.setdefault("declined_topics", [])
+    if topic not in topics:
+        topics.append(topic)
+
+
 def note_customer_requirements(text):
     """Remember only the latest locality and configuration stated on this call."""
     configuration = extract_configuration(text)
     if configuration:
         conversation_memory["customer_configuration"] = configuration
+        close_open_topic("configuration")
     note_variant(text)
     accept_offered_size(text)
+    note_purpose(text)
     locality = extract_locality(text)
     if locality:
         conversation_memory["customer_locality"] = locality
@@ -1096,9 +1272,20 @@ def remember_spoken(text):
     conversation_memory["last_spoken_reply"] = text
     questions = [part.strip() for part in re.findall(r"[^?]*\?", text or "") if part.strip()]
     question = questions[-1] if questions else None
+    if question:
+        pieces = split_sentences(question)
+        question = pieces[-1] if pieces else question
     conversation_memory["last_agent_question"] = question
     if question and re.search(r"which configuration|one, two, three", question, re.I):
         conversation_memory["configuration_asked"] = True
+    if re.search(r"\b(electronic city|hosur road)\b", text or "", re.I):
+        remember_covered("location")
+    if re.search(r"\bkind of home\b", text or "", re.I):
+        remember_covered("home")
+    if re.search(r"\bstarting price\b", text or "", re.I):
+        remember_covered("price")
+    if re.search(r"\bamenities\b", text or "", re.I):
+        remember_covered("amenities")
 
 
 def is_short_continuation(text):
@@ -1156,7 +1343,8 @@ def is_flexible_about_size(text):
         return False
     return re.search(
         r"\b(anything|either|any size|whatever|flexible|doesn'?t matter|dont matter|"
-        r"don'?t mind|do not mind|both are fine|either is fine)\b",
+        r"don'?t mind|do not mind|both are fine|either is fine|"
+        r"fine with both|fine with either)\b",
         (text or "").lower(),
     ) is not None
 
@@ -1263,25 +1451,479 @@ def accept_offered_size(text):
 def reply_asks_about_size(answer):
     if "?" not in (answer or ""):
         return False
-    return re.search(
-        r"\b(size|sizes|luxe|grande|sq\.?\s*ft|square|layout|larger|compact|which of these)\b",
-        answer,
+    return asks_customer_to_choose_size(answer)
+
+
+def split_sentences(text):
+    """Split on sentence ends. The periods inside 'sq. ft.' stay in the sentence."""
+    protected = re.sub(
+        r"\bsq\.",
+        lambda match: match.group(0)[:-1] + "\u2024",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+    protected = re.sub(
+        r"\b(?i:ft)\.(?=\s+[a-z])",
+        lambda match: match.group(0)[:-1] + "\u2024",
+        protected,
+    )
+    parts = re.split(r"(?<=[.?!])\s+", protected)
+    return [part.replace("\u2024", ".").strip() for part in parts if part.strip()]
+
+
+def asks_customer_to_choose_size(sentence):
+    """A question that asks for a size. Mentioning a range while asking something else is not one."""
+    if "?" not in (sentence or ""):
+        return False
+    if re.search(
+        r"\b(larger|smaller|compact|luxe or grande|which size|what size|"
+        r"specific size|size range|within this|which of these sizes)\b",
+        sentence,
         re.I,
+    ):
+        return True
+    mentions_size = re.search(r"\b(sq\.?\s*ft|square feet|\d{3,4})\b", sentence, re.I)
+    other_topic = re.search(
+        r"\b(inventory|amenities|amenity|open space|location|payment|price|"
+        r"visit|investment|live)\b",
+        sentence,
+        re.I,
+    )
+    return bool(mentions_size and not other_topic)
+
+
+PURPOSE_QUESTION = "Are you looking at this to live in, or as an investment?"
+LOCATION_QUESTION = "Would you like to know about the location?"
+HOME_QUESTION = "Would you like to hear about the kind of home?"
+PRICE_QUESTION = "Would you like to know the starting price?"
+AMENITIES_QUESTION = "Would you like to hear about the amenities?"
+
+
+def blocked_topics():
+    """Topics already spoken, declined, or left open. The next question must not use them."""
+    blocked = set(conversation_memory.get("covered_topics") or [])
+    blocked.update(conversation_memory.get("declined_topics") or [])
+    blocked.update(conversation_memory.get("open_topics") or [])
+    return blocked
+
+
+def next_question():
+    """One next question that is not the question just asked and not a parked topic."""
+    last = conversation_memory.get("last_agent_question") or ""
+    blocked = blocked_topics()
+    choices = []
+    if not conversation_memory.get("customer_purpose") and "purpose" not in blocked:
+        choices.append(PURPOSE_QUESTION)
+    if "location" not in blocked:
+        choices.append(LOCATION_QUESTION)
+    if "home" not in blocked:
+        choices.append(HOME_QUESTION)
+    if "price" not in blocked and "budget" not in blocked:
+        choices.append(PRICE_QUESTION)
+    if "amenities" not in blocked:
+        choices.append(AMENITIES_QUESTION)
+    for question in choices:
+        if question != last:
+            return question
+    return "What else can I help you with?"
+
+
+def move_on_line():
+    return f"That's alright. {next_question()}"
+
+
+def topic_of_text(text):
+    """The fact a line is about, if it is one of these."""
+    last = (text or "").lower()
+    if not last:
+        return None
+    if re.search(r"\bbudget\b", last):
+        return "budget"
+    if re.search(r"\b(price|cost|spend|crore)\b", last):
+        return "price"
+    if re.search(r"\b(amenities|amenity)\b", last):
+        return "amenities"
+    if re.search(r"\blocation\b", last):
+        return "location"
+    if re.search(r"\bkind of home\b", last):
+        return "home"
+    if re.search(
+        r"\b(size|sizes|range|luxe|grande|sq|larger|smaller|layout|square)\b",
+        last,
+    ):
+        return "size"
+    if re.search(r"\b(configurations?|bhk|bedroom)\b", last):
+        return "configuration"
+    if re.search(r"\b(investment|live in|own use)\b", last):
+        return "purpose"
+    if re.search(r"\b(visit|schedule)\b", last):
+        return "visit"
+    return None
+
+
+def fact_for_offered_topic(topic):
+    """The stored project fact for a topic the customer agreed to hear."""
+    if topic == "home":
+        return "SOBHA Townpark is a New York-themed luxury community."
+    if topic == "price":
+        return f"SOBHA Townpark starts at approximately {PROJECT_KB['starting_price']}."
+    if topic == "amenities":
+        return f"SOBHA Townpark offers {PROJECT_KB['amenities']}."
+    if topic == "location":
+        return f"SOBHA Townpark is located {PROJECT_KB['location']}."
+    return None
+
+
+def reply_for_accepted_topic(user_text):
+    """A yes to an offered topic is answered here. A yes to a visit is not."""
+    if not is_positive(user_text) or not conversation_memory.get("last_agent_question"):
+        return None
+    topic = topic_just_asked()
+    fact = fact_for_offered_topic(topic)
+    if not fact:
+        return None
+    remember_covered(topic)
+    conversation_memory["stage"] = "answer_faq"
+    conversation_memory["awaiting_visit_decision"] = False
+    return f"{fact} {next_question()}"
+
+
+def topic_just_asked():
+    """The fact the last question was waiting for, if it was one of these."""
+    return topic_of_text(conversation_memory.get("last_agent_question") or "")
+
+
+def leaves_fact_open(text):
+    """The customer is not supplying the fact just asked."""
+    if is_unsure(text) or is_flexible_about_size(text):
+        return True
+    return re.search(
+        r"\b(no preference|not decided|haven'?t decided|haven'?t finalized|"
+        r"not finalized|yet to finalize|you tell me|you decide|"
+        r"skip that|whatever you (?:think|suggest)|either way)\b",
+        (text or "").lower(),
     ) is not None
 
 
+def acknowledge_open(topic):
+    """One acknowledgement and one different question."""
+    if topic == "budget":
+        nxt = next_question() if "location" in blocked_topics() else (
+            HOME_QUESTION
+            if (conversation_memory.get("last_agent_question") or "") == LOCATION_QUESTION
+            else LOCATION_QUESTION
+        )
+        return f"That's alright, we can leave the budget for now. {nxt}"
+    if topic == "size" and conversation_memory.get("size_decided"):
+        variant = conversation_memory.get("customer_variant") or "selected"
+        config = conversation_memory.get("customer_configuration") or "home"
+        lead = f"That's alright, we'll keep the {variant} {config} range."
+    elif topic == "size":
+        lead = "That's alright, we can leave the size open."
+    elif topic == "configuration":
+        lead = "That's alright, we can leave the configuration open."
+    else:
+        lead = "That's alright."
+    return f"{lead} {next_question()}"
+
+
+def reply_for_open_answer(user_text):
+    """Acknowledge an open answer before the model writes a reply. None when the model should answer."""
+    if not leaves_fact_open(user_text) or not conversation_memory.get("last_agent_question"):
+        return None
+    topic = topic_just_asked()
+    if topic == "size":
+        if conversation_memory.get("size_decided"):
+            conversation_memory["size_closed_before_turn"] = True
+            close_open_topic("size")
+        else:
+            remember_open("size")
+        return acknowledge_open("size")
+    if topic:
+        remember_open(topic)
+        return acknowledge_open(topic)
+    if is_unsure(user_text) or is_flexible_about_size(user_text):
+        return move_on_line()
+    return None
+
+
 def leave_closed_size(user_query, answer):
-    """Once a size is stored, a later reply must not ask about size again."""
+    """Once a size is stored, drop a later size question and keep the rest of the answer."""
     if not (
         conversation_memory.get("size_decided")
         and conversation_memory.get("size_closed_before_turn")
         and not customer_reopens_size(user_query)
-        and reply_asks_about_size(answer)
     ):
         return answer
-    variant = conversation_memory.get("customer_variant") or "selected"
-    config = conversation_memory.get("customer_configuration") or "home"
-    return f"The {variant} {config} is noted. What else would you like to know about it?"
+    kept = [
+        sentence
+        for sentence in split_sentences(answer)
+        if not asks_customer_to_choose_size(sentence)
+    ]
+    if not kept:
+        return ""
+    return " ".join(kept)
+
+
+def customer_asks_about_configuration(text):
+    """The customer asked to hear configurations. A parked topic stays parked otherwise."""
+    return re.search(
+        r"\b(configuration|configurations|floor plan|floorplan|bhk|bedroom|layout|sizes|size)\b",
+        text or "",
+        re.I,
+    ) is not None
+
+
+def sentence_asks_to_pick_configuration(sentence):
+    """Any question that brings configurations back, including 'available configurations'."""
+    if "?" not in (sentence or ""):
+        return False
+    return re.search(
+        r"\b(configurations?|which bhk|specific configuration|specific sizes|"
+        r"available configuration|available sizes|"
+        r"one, two, three|smaller or larger|larger or smaller)\b",
+        sentence,
+        re.I,
+    ) is not None
+
+
+def sentence_lists_bhk_menu(sentence):
+    """A recital of the 1 to 4 BHK menu, not one home's size."""
+    if re.search(r"\b1\s*bhk\s*to\s*4\s*bhk\b", sentence or "", re.I):
+        return True
+    if re.search(r"\b(1|one)\s+to\s+(4|four)\s+bhk\b", sentence or "", re.I):
+        return True
+    if re.search(r"\b(one|1)\s+to\s+(four|4)\s+bedrooms?\b", sentence or "", re.I):
+        return True
+    if re.search(
+        r"\b(1|one)\b.{0,40}\b(2|two)\b.{0,40}\b(3|three)\b.{0,40}\b(4|four)\b",
+        sentence or "",
+        re.I,
+    ):
+        return True
+    labels = []
+    for item in re.findall(r"\b[1-4]\s*bhk\b", sentence or "", re.I):
+        key = re.sub(r"\s+", " ", item.lower())
+        if key not in labels:
+            labels.append(key)
+    return len(labels) >= 3
+
+
+def drop_unsupported_percent(answer):
+    """Drop a percent the project facts do not contain."""
+    facts = " ".join(str(value) for value in PROJECT_KB.values())
+    kept = []
+    for sentence in split_sentences(answer):
+        percents = re.findall(r"\d+\s*%", sentence)
+        if any(percent.replace(" ", "") not in facts.replace(" ", "") for percent in percents):
+            continue
+        kept.append(sentence)
+    return " ".join(kept)
+
+
+def leave_closed_configuration(user_query, answer):
+    """Once configuration is left open, do not ask the BHK menu again unless they ask."""
+    if conversation_memory.get("customer_configuration"):
+        return answer
+    if "configuration" not in (conversation_memory.get("open_topics") or []):
+        return answer
+    asked = customer_asks_about_configuration(user_query)
+    kept = []
+    for sentence in split_sentences(answer):
+        if sentence_asks_to_pick_configuration(sentence):
+            continue
+        if not asked and sentence_lists_bhk_menu(sentence):
+            continue
+        kept.append(sentence)
+    if not kept:
+        return ""
+    spoken = " ".join(kept)
+    if "?" not in spoken:
+        return f"{spoken} {next_question()}"
+    return spoken
+
+
+def sentence_claims_chosen_configuration(sentence):
+    """A claim that a configuration was chosen, when none was stored."""
+    return re.search(
+        r"\b(already chosen|have chosen|you chose|you selected)\b",
+        sentence or "",
+        re.I,
+    ) is not None and re.search(r"\bconfiguration\b", sentence or "", re.I) is not None
+
+
+def drop_false_configuration_claim(answer):
+    if not answer or conversation_memory.get("customer_configuration"):
+        return answer
+    kept = [
+        sentence
+        for sentence in split_sentences(answer)
+        if not sentence_claims_chosen_configuration(sentence)
+    ]
+    return " ".join(kept)
+
+
+def leave_blocked_topics(answer):
+    """Drop a question whose topic was already spoken or declined."""
+    if not answer:
+        return answer
+    blocked = blocked_topics()
+    kept = []
+    dropped = False
+    for sentence in split_sentences(answer):
+        topic = topic_of_text(sentence)
+        if topic and topic in blocked and "?" in sentence:
+            dropped = True
+            continue
+        kept.append(sentence)
+    if not kept:
+        return ""
+    spoken = " ".join(kept)
+    if dropped and "?" not in spoken:
+        return f"{spoken} {next_question()}"
+    return spoken
+
+
+def drop_question_just_answered(answer):
+    """Do not ask to hear a topic the same reply has just stated."""
+    if not answer:
+        return answer
+    stated = set()
+    kept = []
+    dropped = False
+    for sentence in split_sentences(answer):
+        topic = topic_of_text(sentence)
+        if topic in ("home", "price", "amenities", "location") and "?" not in sentence:
+            stated.add(topic)
+            remember_covered(topic)
+        if topic in stated and "?" in sentence:
+            dropped = True
+            continue
+        kept.append(sentence)
+    if not kept:
+        return ""
+    spoken = " ".join(kept)
+    if dropped and "?" not in spoken:
+        return f"{spoken} {next_question()}"
+    return spoken
+
+
+def declines_offered_topic(text):
+    """A no to the last offer. 'Not interested in that' is the offer, not the whole call."""
+    low = (text or "").lower()
+    if re.search(r"\bnot interested in (that|it|those|them)\b", low):
+        return True
+    if re.search(r"\bno,?\s+i am not\b", low):
+        return True
+    return re.search(
+        r"\b(already told|already said|already asked|already answered|"
+        r"you told|you mentioned|you asked|heard that|didn'?t answer|repeating)\b",
+        low,
+    ) is not None
+
+
+def declines_the_project(text):
+    """A bare 'not interested' ends the call. 'Not interested in that' does not."""
+    if declines_offered_topic(text):
+        return False
+    return is_not_interested(text)
+
+
+def reply_for_declined_topic(user_text):
+    """Acknowledge a no to the last topic and ask about something still open."""
+    if not declines_offered_topic(user_text) or not conversation_memory.get("last_agent_question"):
+        return None
+    topic = topic_just_asked()
+    if topic:
+        remember_declined(topic)
+    if re.search(r"\b(already told|already said|you told|you mentioned)\b", user_text or "", re.I):
+        lead = "Understood."
+    else:
+        lead = "That's alright."
+    conversation_memory["stage"] = "answer_faq"
+    conversation_memory["awaiting_visit_decision"] = False
+    return f"{lead} {next_question()}"
+
+
+def _variant_number_map(label):
+    line = UNIT_SIZES.get(label) or ""
+    chunks = re.split(r"\b(Luxe|Grande)\b", line)
+    mapping = {"Luxe": [], "Grande": []}
+    current = None
+    for chunk in chunks:
+        if chunk in ("Luxe", "Grande"):
+            current = chunk
+        elif current:
+            mapping[current].extend(re.findall(r"\d{3,4}", chunk))
+    return mapping
+
+
+def _named_configs(sentence):
+    found = []
+    for number, label in (("1", "1 BHK"), ("2", "2 BHK"), ("3", "3 BHK"), ("4", "4 BHK")):
+        if re.search(rf"\b{number}\s*bhk\b", sentence or "", re.I) and label not in found:
+            found.append(label)
+    return found
+
+
+def _segment_matches(label, part):
+    numbers = re.findall(r"\d{3,4}", part or "")
+    allowed = re.findall(r"\d{3,4}", UNIT_SIZES.get(label) or "")
+    if not numbers or any(number not in allowed for number in numbers):
+        return False
+    variant_numbers = _variant_number_map(label)
+    for variant in ("Luxe", "Grande"):
+        claimed = []
+        for match in re.finditer(
+            rf"(\d{{3,4}})(?:\s+to\s+(\d{{3,4}}))?(?:\s+sq\.?\s*ft\.?)?\s+in\s+{variant}\b",
+            part or "",
+            re.I,
+        ):
+            claimed.append(match.group(1))
+            if match.group(2):
+                claimed.append(match.group(2))
+        for match in re.finditer(
+            rf"\b{variant}\b(?:\s+\w+){{0,6}}\s+(\d{{3,4}})(?:\s+to\s+(\d{{3,4}}))?",
+            part or "",
+            re.I,
+        ):
+            claimed.append(match.group(1))
+            if match.group(2):
+                claimed.append(match.group(2))
+        if claimed and any(number not in variant_numbers.get(variant, []) for number in claimed):
+            return False
+    return True
+
+
+def _recites_a_size(sentence):
+    return (
+        re.search(r"\b\d{3,4}\b", sentence or "") is not None
+        and re.search(r"\b(sq|square|bhk|luxe|grande)\b", sentence or "", re.I) is not None
+    )
+
+
+def use_unit_sizes(user_query, answer):
+    """A size recital uses the stored ranges. Swapped Luxe and Grande labels are replaced."""
+    if not answer:
+        return answer
+    stored = conversation_memory.get("customer_configuration")
+    asked = customer_asks_about_configuration(user_query)
+    rebuilt = []
+    for sentence in split_sentences(answer):
+        if not _recites_a_size(sentence):
+            rebuilt.append(sentence)
+            continue
+        named = _named_configs(sentence)
+        if stored in UNIT_SIZES and not asked and len(named) > 1:
+            rebuilt.append(UNIT_SIZES[stored])
+            continue
+        if not named and stored in UNIT_SIZES:
+            named = [stored]
+        if named and any(not _segment_matches(label, sentence) for label in named):
+            rebuilt.append(" ".join(UNIT_SIZES[label] for label in named))
+            continue
+        rebuilt.append(sentence)
+    return " ".join(rebuilt)
 
 
 def drop_unasked_payment(user_query, answer):
@@ -1368,6 +2010,8 @@ def missing_requirement_question(text):
     ):
         return None
     if not conversation_memory.get("customer_configuration"):
+        if "configuration" in (conversation_memory.get("open_topics") or []):
+            return None
         if conversation_memory.get("configuration_asked"):
             if is_short_continuation(text):
                 return CONFIGURATION_FOLLOWUP
@@ -1425,6 +2069,10 @@ def reset_memory():
     conversation_memory["size_closed_before_turn"] = False
     conversation_memory["last_spoken_reply"] = None
     conversation_memory["declined_topics"] = []
+    conversation_memory["covered_topics"] = []
+    conversation_memory["open_topics"] = []
+    conversation_memory["customer_purpose"] = None
+    conversation_memory["visit_offered"] = False
 
 
 def grounded_reply(user_text):
@@ -1486,6 +2134,7 @@ def answer_faq_and_prompt(user_text, nudge_visit=False):
 
 def propose_slot_twiml():
     """Ask once whether to schedule a visit."""
+    conversation_memory["visit_offered"] = True
     return f"""
 <Response>
 
@@ -1497,6 +2146,7 @@ def propose_slot_twiml():
 
 def visit_day_twiml():
     """After yes to visit — ask which day only (time comes next as fixed slots)."""
+    conversation_memory["visit_offered"] = True
     return f"""
 <Response>
 
@@ -1643,6 +2293,84 @@ async def voice():
         return Response(content=fallback, media_type="application/xml")
 
 
+def decline_project_twiml():
+    """A customer who is not interested ends the call. This is not a visit offer."""
+    return advisor_followup_twiml()
+
+
+def advisor_followup_twiml():
+    """One polite close after a project no, a deferred visit, or no details."""
+    conversation_memory["stage"] = "closed"
+    return Response(
+        content=polite_exit_twiml(ADVISOR_CLOSE),
+        media_type="application/xml",
+    )
+
+
+def share_details_twiml():
+    """They agreed to documents or highlights. Arrange that, then stop."""
+    conversation_memory["stage"] = "closed"
+    return Response(
+        content=polite_exit_twiml(SHARE_CLOSE),
+        media_type="application/xml",
+    )
+
+
+def offer_the_visit_once():
+    """A no to one topic can still hear the visit question one time."""
+    conversation_memory["visit_offered"] = True
+    conversation_memory["stage"] = "propose_slot"
+    return Response(content=propose_slot_twiml(), media_type="application/xml")
+
+
+def close_or_offer_the_visit():
+    """Offer the visit once. The same goodbye after that visit closes the call."""
+    stage = conversation_memory.get("stage")
+    if conversation_memory.get("visit_offered") or stage in (
+        "propose_slot", "visit_day", "visit_pick_slot",
+    ):
+        return advisor_followup_twiml()
+    return offer_the_visit_once()
+
+
+def polite_stop(user_text):
+    """Close when the customer is done with the project, the visit, or any details."""
+    if declines_the_project(user_text) or refuses_details(user_text):
+        return advisor_followup_twiml()
+    on_visit = conversation_memory.get("stage") in (
+        "propose_slot", "visit_day", "visit_pick_slot",
+    )
+    if on_visit and (
+        defers_the_visit(user_text)
+        or has_not_finalized(user_text)
+        or finished_this_topic(user_text)
+        or is_clear_negative(user_text)
+    ):
+        return advisor_followup_twiml()
+    return None
+
+
+def yes_to_materials(user_text):
+    """A yes to highlights or documents arranges the details. It does not book a day."""
+    if not is_positive(user_text) or wants_site_visit(user_text):
+        return False
+    if last_question_is_visit():
+        return False
+    return last_question_offers_materials() or agrees_to_materials(user_text)
+
+
+def visit_needs_a_clear_yes_twiml():
+    """A bare okay does not book the visit."""
+    conversation_memory["stage"] = "propose_slot"
+    conversation_memory["awaiting_visit_decision"] = False
+    return Response(
+        content=qualification_twiml(
+            "That's alright. Would you like to schedule a site visit, or shall I leave it for now?"
+        ),
+        media_type="application/xml",
+    )
+
+
 # =====================================================
 # HANDLE SPEECH
 # =====================================================
@@ -1697,6 +2425,9 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
         return answer_in_place(user_text)
 
     if stage == "qualify":
+        stopped = polite_stop(user_text)
+        if stopped:
+            return stopped
         if needs_time(user_text):
             return time_to_decide_twiml()
         if wants_site_visit(user_text):
@@ -1704,6 +2435,18 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
             conversation_memory["slot_pick_retries"] = 0
             return Response(content=visit_day_twiml(), media_type="application/xml")
         note_customer_requirements(user_text)
+        declined = reply_for_declined_topic(user_text)
+        if declined:
+            return Response(content=qualification_twiml(declined), media_type="application/xml")
+        opened = reply_for_open_answer(user_text)
+        if opened:
+            conversation_memory["stage"] = "answer_faq"
+            return Response(content=qualification_twiml(opened), media_type="application/xml")
+        accepted = reply_for_accepted_topic(user_text)
+        if accepted:
+            return Response(content=qualification_twiml(accepted), media_type="application/xml")
+        if finished_this_topic(user_text):
+            return close_or_offer_the_visit()
         question = missing_requirement_question(user_text)
         if question:
             return Response(content=qualification_twiml(question), media_type="application/xml")
@@ -1712,23 +2455,26 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
         return Response(content=twiml, media_type="application/xml")
 
     if stage == "answer_faq":
+        stopped = polite_stop(user_text)
+        if stopped:
+            return stopped
         if needs_time(user_text):
             return time_to_decide_twiml()
         if conversation_memory.get("awaiting_visit_decision"):
             conversation_memory["awaiting_visit_decision"] = False
+            opened = reply_for_open_answer(user_text)
+            if opened:
+                return Response(content=qualification_twiml(opened), media_type="application/xml")
+            if is_bare_okay(user_text):
+                return visit_needs_a_clear_yes_twiml()
+            if yes_to_materials(user_text):
+                return share_details_twiml()
             if is_positive(user_text) or wants_site_visit(user_text):
                 conversation_memory["stage"] = "visit_day"
                 conversation_memory["slot_pick_retries"] = 0
                 return Response(content=visit_day_twiml(), media_type="application/xml")
             if is_clear_negative(user_text):
-                conversation_memory["stage"] = "closed"
-                return Response(
-                    content=polite_exit_twiml(
-                        "No worries. Our sales advisor will follow up with more details. "
-                        "Thanks for your time, and have a great day."
-                    ),
-                    media_type="application/xml",
-                )
+                return advisor_followup_twiml()
             conversation_memory["stage"] = "answer_faq"
             twiml = answer_faq_and_prompt(user_text)
             return Response(content=twiml, media_type="application/xml")
@@ -1739,14 +2485,21 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
             return Response(content=visit_day_twiml(), media_type="application/xml")
 
         note_customer_requirements(user_text)
+        declined = reply_for_declined_topic(user_text)
+        if declined:
+            return Response(content=qualification_twiml(declined), media_type="application/xml")
+        opened = reply_for_open_answer(user_text)
+        if opened:
+            return Response(content=qualification_twiml(opened), media_type="application/xml")
+        accepted = reply_for_accepted_topic(user_text)
+        if accepted:
+            return Response(content=qualification_twiml(accepted), media_type="application/xml")
+        if finished_this_topic(user_text):
+            return close_or_offer_the_visit()
         question = missing_requirement_question(user_text)
         if question:
             conversation_memory["stage"] = "qualify"
             return Response(content=qualification_twiml(question), media_type="application/xml")
-
-        if is_done_with_questions(user_text):
-            conversation_memory["stage"] = "propose_slot"
-            return Response(content=propose_slot_twiml(), media_type="application/xml")
 
         if is_new_faq_question(user_text):
             nudge = conversation_memory["faq_count"] >= MAX_FAQ_TURNS
@@ -1774,7 +2527,22 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
         return Response(content=twiml, media_type="application/xml")
 
     if stage == "propose_slot":
-        if is_positive(user_text) or wants_site_visit(user_text):
+        stopped = polite_stop(user_text)
+        if stopped:
+            return stopped
+        if needs_time(user_text):
+            return time_to_decide_twiml()
+        declined = reply_for_declined_topic(user_text)
+        if declined:
+            return Response(content=qualification_twiml(declined), media_type="application/xml")
+        opened = reply_for_open_answer(user_text)
+        if opened:
+            return Response(content=qualification_twiml(opened), media_type="application/xml")
+        if is_bare_okay(user_text):
+            return visit_needs_a_clear_yes_twiml()
+        if yes_to_materials(user_text):
+            return share_details_twiml()
+        if (is_positive(user_text) and last_question_is_visit()) or wants_site_visit(user_text):
             conversation_memory["stage"] = "visit_day"
             conversation_memory["slot_pick_retries"] = 0
             return Response(content=visit_day_twiml(), media_type="application/xml")
@@ -1784,26 +2552,32 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
             twiml = answer_faq_and_prompt(user_text)
             return Response(content=twiml, media_type="application/xml")
 
-        if is_clear_negative(user_text):
-            conversation_memory["stage"] = "closed"
-            return Response(
-                content=polite_exit_twiml(
-                    "Understood. I'll have our advisor share the latest information with you. "
-                    "Thank you for your time. Have a great day."
-                ),
-                media_type="application/xml",
-            )
-
         return answer_in_place(user_text)
 
     if stage == "visit_day":
+        stopped = polite_stop(user_text)
+        if stopped:
+            return stopped
+        if needs_time(user_text):
+            return time_to_decide_twiml()
+        opened = reply_for_open_answer(user_text)
+        if opened:
+            return Response(content=qualification_twiml(opened), media_type="application/xml")
         if names_a_day(user_text):
-            conversation_memory["visit_day"] = user_text.strip()
+            conversation_memory["visit_day"] = user_text.strip().strip(" .,!")
             conversation_memory["stage"] = "visit_pick_slot"
             return Response(content=visit_slot_choice_twiml(is_retry=False), media_type="application/xml")
         return answer_in_place(user_text)
 
     if stage == "visit_pick_slot":
+        stopped = polite_stop(user_text)
+        if stopped:
+            return stopped
+        if needs_time(user_text):
+            return time_to_decide_twiml()
+        opened = reply_for_open_answer(user_text)
+        if opened:
+            return Response(content=qualification_twiml(opened), media_type="application/xml")
         slot = parse_bookable_slot(user_text)
         if slot:
             conversation_memory["selected_slot"] = slot

@@ -3,12 +3,16 @@
 Reuses app_v3.voice() and app_v3.handle_speech(). Twilio, Gather, and
 Polly are not used. Bind is localhost only. Spoken replies use Sarvam
 Bulbul, and fall back to Neerja if Bulbul does not return audio.
+The page speaks the first clause before the later clauses are synthesized.
 """
 
 import base64
+import io
 import re
+import struct
 import sys
 import time
+import wave
 from pathlib import Path
 
 import edge_tts
@@ -150,6 +154,31 @@ def for_speech(text):
     return re.sub(r"\bsq\.?\s*ft\.?", "square feet", text, flags=re.IGNORECASE)
 
 
+def speech_clauses(text):
+    """Split a finished reply into spoken clauses. 'sq.' stays in one clause."""
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    protected = re.sub(r"\bsq\.", lambda match: match.group(0)[:-1] + "\u2024", raw, flags=re.IGNORECASE)
+    protected = re.sub(
+        r"\b([AaPp])\.(?=[Mm]\.)",
+        lambda match: match.group(1) + "\u2024",
+        protected,
+    )
+    clauses = []
+    for part in re.split(r"(?<=[.?!])\s+|\s*;\s*", protected):
+        restored = part.replace("\u2024", ".").strip()
+        if restored:
+            clauses.append(restored)
+    return clauses
+
+
+@local_app.post("/local/clauses")
+def list_clauses(turn: Turn):
+    """Return the clauses of a finished reply, in speaking order."""
+    return {"clauses": speech_clauses(turn.text or "")}
+
+
 def bulbul_audio(text):
     """One spoken reply from Sarvam Bulbul. None when the call does not return audio."""
     if not app_v3.SARVAM_API_KEY:
@@ -195,7 +224,7 @@ async def neerja_audio(text):
 
 @local_app.post("/local/speak")
 async def speak_reply(turn: Turn):
-    """Speak one reply with Bulbul. Neerja speaks only if Bulbul returns no audio."""
+    """Speak one clause with Bulbul. Neerja speaks only if Bulbul returns no audio."""
     text = for_speech((turn.text or "").strip())
     if not text:
         return Response(status_code=400)
@@ -213,11 +242,46 @@ async def speak_reply(turn: Turn):
     return Response(content=audio, media_type=media, headers={"X-Voice": voice})
 
 
+def clip_has_speech(audio: bytes, min_seconds: float = 0.4) -> bool:
+    """True when the loud part of a clip lasts long enough to be speech."""
+    try:
+        with wave.open(io.BytesIO(audio), "rb") as wav:
+            channels = wav.getnchannels()
+            width = wav.getsampwidth()
+            rate = wav.getframerate()
+            frames = wav.readframes(wav.getnframes())
+    except (wave.Error, EOFError):
+        return False
+    if channels != 1 or width != 2 or rate <= 0 or not frames:
+        return False
+    count = len(frames) // 2
+    samples = struct.unpack("<" + "h" * count, frames[: count * 2])
+    frame_n = max(1, int(rate * 0.02))
+    levels = []
+    for start in range(0, count - frame_n + 1, frame_n):
+        chunk = samples[start : start + frame_n]
+        energy = sum(sample * sample for sample in chunk) / len(chunk)
+        levels.append((energy ** 0.5) / 32768.0)
+    if not levels:
+        return False
+    quiet = [level for level in levels if level < 0.04]
+    if len(quiet) >= 3:
+        ordered = sorted(quiet)
+        floor = ordered[len(ordered) // 2]
+        threshold = max(0.04, floor * 2.5)
+    else:
+        threshold = 0.04
+    loud = sum(1 for level in levels if level > threshold)
+    return (loud * frame_n / rate) >= min_seconds
+
+
 @local_app.post("/local/listen")
 async def listen(file: UploadFile = File(...)):
     """Transcribe one microphone clip. The browser speech service is not used."""
     audio = await file.read()
     if len(audio) < 800:
+        return {"text": ""}
+    if not clip_has_speech(audio):
         return {"text": ""}
     if not app_v3.SARVAM_API_KEY:
         return {"text": "", "error": "Speech transcription is not configured."}

@@ -55,17 +55,35 @@ def _question_kind(question: str) -> str:
         return "size"
     if re.search(r"what would you like", text):
         return "open"
-    if re.search(r"\b(would you|do you|is now|shall i)\b", text):
+    if re.search(r"\b(would you|do you|is now|shall i|shall we)\b", text):
         return "yes_no"
+    if re.search(r"\b(live in|investment|own use)\b", text):
+        return "purpose"
     return "other"
+
+
+def _leaves_open(text: str) -> bool:
+    """The customer left the last topic open. That is an answer."""
+    return re.search(
+        r"\b(haven'?t decided|not decided|not sure|"
+        r"not interested in (?:that|it|those|them)|"
+        r"already told|already said|already asked|already answered|"
+        r"you told|you mentioned|you asked|heard that|didn'?t answer|repeating)\b",
+        text or "",
+        re.I,
+    ) is not None
 
 
 def _customer_kind(text: str) -> str:
     lowered = (text or "").lower()
+    if _leaves_open(lowered):
+        return "open_answer"
     if re.search(r"\b(no|nope|not interested|i'm good|im good)\b", lowered):
         return "no"
     if re.search(r"\b(yes|yeah|yep|yup|sure|okay|ok)\b", lowered):
         return "yes"
+    if re.search(r"\b(live in|investment)\b", lowered):
+        return "purpose"
     if re.search(r"\b([1-4]|one|two|three|four)\s*-?\s*bhk\b", lowered):
         return "bhk"
     if re.search(r"\b(luxe|grande|\d{3,4}|square|sq)\b", lowered):
@@ -78,6 +96,7 @@ _FIT = {
     ("yes_no", "no"),
     ("configuration", "bhk"),
     ("size", "size"),
+    ("purpose", "purpose"),
     ("open", "yes"),
     ("open", "no"),
     ("open", "bhk"),
@@ -100,24 +119,78 @@ def latency_summary(turns: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _states_location(text: str) -> bool:
+    return re.search(r"\b(electronic city|hosur road)\b", text or "", re.I) is not None
+
+
+def _configuration_question(reply: str) -> str | None:
+    """A question that asks the customer to pick a configuration. Leaving it open does not."""
+    for question in _questions(reply):
+        asked = _focus(question)
+        if re.search(r"\bleave the configuration\b", asked, re.I):
+            continue
+        if re.search(
+            r"\b(configurations?|which configuration|which bhk|one, two, three|bhk homes)\b",
+            asked,
+            re.I,
+        ):
+            return question
+    return None
+
+
+def _location_question(reply: str) -> str | None:
+    for question in _questions(reply):
+        if re.search(r"\blocation\b", question, re.I):
+            return question
+    return None
+
+
 def repeated_questions(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: dict[str, int] = {}
     repeats = []
+    recorded: set[tuple[int, str]] = set()
+    location_at: int | None = None
+    configuration_at: int | None = None
+
+    def add(turn_index: int, question: str, first_turn_index: int) -> None:
+        key = (turn_index, _norm(question))
+        if key in recorded:
+            return
+        recorded.add(key)
+        text = question.strip()
+        if not text.endswith("?"):
+            text += "?"
+        repeats.append(
+            {
+                "turn_index": turn_index,
+                "question": text,
+                "first_turn_index": first_turn_index,
+            }
+        )
+
     for turn in turns:
-        for question in _questions(turn.get("reply") or ""):
+        reply = turn.get("reply") or ""
+        index = turn["turn_index"]
+        for question in _questions(reply):
             key = _norm(_focus(question))
             if not key:
                 continue
             if key in seen:
-                repeats.append(
-                    {
-                        "turn_index": turn["turn_index"],
-                        "question": question.strip() + "?",
-                        "first_turn_index": seen[key],
-                    }
-                )
+                add(index, question.strip() + "?", seen[key])
             else:
-                seen[key] = turn["turn_index"]
+                seen[key] = index
+        if location_at is not None:
+            question = _location_question(reply)
+            if question:
+                add(index, question, location_at)
+        if configuration_at is not None:
+            question = _configuration_question(reply)
+            if question:
+                add(index, question, configuration_at)
+        if location_at is None and _states_location(reply):
+            location_at = index
+        if configuration_at is None and _configuration_question(reply):
+            configuration_at = index
     return repeats
 
 
@@ -138,7 +211,7 @@ def last_answer_fit(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
             results.append(
                 {
                     "turn_index": turn["turn_index"],
-                    "fit": (kind, answer) in _FIT,
+                    "fit": answer in ("open_answer", "no") or (kind, answer) in _FIT,
                     "na": False,
                     "question_kind": kind,
                     "answer_kind": answer,
@@ -184,12 +257,22 @@ def extra_questions(turns: list[dict[str, Any]]) -> list[int]:
     ]
 
 
+def _states_configuration_menu(reply: str) -> bool:
+    """A statement of the 1 to 4 menu. Leaving configuration open does not count."""
+    text = reply or ""
+    if re.search(r"\bleave the configuration\b", text, re.I):
+        return False
+    if re.search(r"\b(1|one)\s+to\s+(4|four)\s+bhk\b", text, re.I):
+        return True
+    return re.search(r"\b(one|1)\s+to\s+(four|4)\s+bedrooms?\b", text, re.I) is not None
+
+
 def repeated_configuration_prompts(turns: list[dict[str, Any]]) -> list[int]:
     hits = []
     seen = False
     for turn in turns:
-        reply = (turn.get("reply") or "").lower()
-        if "which configuration are you looking for" not in reply:
+        reply = turn.get("reply") or ""
+        if not (_configuration_question(reply) or _states_configuration_menu(reply)):
             continue
         customer = turn.get("customer") or ""
         if seen and _customer_kind(customer) != "bhk":
@@ -212,12 +295,60 @@ def score_measured(record: dict[str, Any]) -> dict[str, Any]:
         ),
         "stage_path": stage_path(turns),
         "premature_site_visits": premature_site_visits(turns),
+        "missed_closes": missed_closes(turns),
         "extra_questions": extra_questions(turns),
         "repeated_configuration_prompts": repeated_configuration_prompts(turns),
     }
 
 
+def missed_closes(turns: list[dict[str, Any]]) -> list[int]:
+    """A project no, a deferred visit, or a refusal of details still got a question.
+
+    A no to configuration or size, followed by the one visit offer, is not this.
+    """
+    visit_offered = False
+    hits = []
+    for turn in turns:
+        customer = turn.get("customer") or ""
+        reply = turn.get("reply") or ""
+        stage = turn.get("stage") or ""
+        asked_again = "?" in reply
+        on_visit = visit_offered or stage in ("propose_slot", "visit_day", "visit_pick_slot")
+        kind = _ending_kind(customer)
+        if asked_again and kind == "project":
+            hits.append(turn.get("turn_index"))
+        elif asked_again and kind == "details":
+            hits.append(turn.get("turn_index"))
+        elif asked_again and kind == "visit" and on_visit:
+            hits.append(turn.get("turn_index"))
+        if re.search(r"\bsite visit\b", reply, re.I):
+            visit_offered = True
+    return hits
+
+
+def _ending_kind(text: str) -> str | None:
+    low = (text or "").lower()
+    if re.search(r"\bnot interested in (?:that|it|those|them)\b", low):
+        return None
+    if re.search(r"\bnot interested\b", low):
+        return "project"
+    if re.search(
+        r"\b(don'?t need|do not need|no need|not need).{0,24}\bdetails\b|\bno details\b",
+        low,
+    ):
+        return "details"
+    if re.search(r"\b(let you know later|i will let you know|i'll let you know)\b", low):
+        return "visit"
+    return None
+
+
 def recommended_change(measured: dict[str, Any]) -> str | None:
+    closes = measured.get("missed_closes") or []
+    if closes:
+        return (
+            f"Close the call at turn {closes[0]}. "
+            "The customer declined the project, deferred the visit, or asked for no details."
+        )
     repeats = measured.get("repeated_questions") or []
     if repeats:
         turn = repeats[0]["turn_index"]

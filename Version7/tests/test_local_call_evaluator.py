@@ -96,7 +96,7 @@ def test_measured_scores_cover_the_call():
     assert measured["repeated_configuration_prompts"] == [3]
     fit = {item["turn_index"]: item["fit"] for item in measured["last_answer_fit"]}
     assert fit[2] is True
-    assert fit[3] is False
+    assert fit[3] is True
     assert fit[5] is True
     assert "Stop repeating the question at turn 3" in recommended_change(measured)
 
@@ -163,6 +163,236 @@ def test_scorecard_uses_a_separate_judge_reply(tmp_path: Path, monkeypatch):
     assert "Stop repeating the question at turn 3" in card
     text = render_scorecard(_record(), result["measured"], result["judged"])
     assert "Answer the layout question." not in text
+
+
+def _open_configuration_call():
+    return {
+        "call_id": "20261014T091409Z",
+        "caller_model": "sarvam-105b-conversations",
+        "turns": [
+            {
+                "turn_index": 1,
+                "customer": None,
+                "reply": (
+                    "Hi, this is Sobha Limited calling. I'm getting in touch about "
+                    "SOBHA Townpark - a New York-inspired luxury community near "
+                    "Electronic City on Hosur Road in Bengaluru. "
+                    "Is now a good time for a quick call?"
+                ),
+                "stage": "greeting",
+                "stt_ms": None,
+                "llm_ms": None,
+                "tts_ms": 1100,
+            },
+            {
+                "turn_index": 2,
+                "customer": "Yes, I can speak now.",
+                "reply": (
+                    "Thanks for taking the call. This is regarding SOBHA Townpark. "
+                    "We have one, two, three, and four BHK homes. "
+                    "Which configuration are you looking for?"
+                ),
+                "stage": "qualify",
+                "stt_ms": 900,
+                "llm_ms": None,
+                "tts_ms": 900,
+            },
+            {
+                "turn_index": 3,
+                "customer": "I haven't decided on it.",
+                "reply": (
+                    "That's alright, we can leave the configuration open. "
+                    "Are you looking at this to live in, or as an investment?"
+                ),
+                "stage": "answer_faq",
+                "stt_ms": 900,
+                "llm_ms": None,
+                "tts_ms": 1100,
+            },
+            {
+                "turn_index": 4,
+                "customer": "To live in.",
+                "reply": (
+                    "Living in is the perfect fit for SOBHA Townpark. "
+                    "Would you like to know about the location?"
+                ),
+                "stage": "answer_faq",
+                "stt_ms": 800,
+                "llm_ms": 811,
+                "tts_ms": 1000,
+            },
+            {
+                "turn_index": 5,
+                "customer": "No, I you already told about that.",
+                "reply": (
+                    "Understood. Since you are already aware of that, "
+                    "shall we look at the available configurations?"
+                ),
+                "stage": "answer_faq",
+                "stt_ms": 900,
+                "llm_ms": 531,
+                "tts_ms": 900,
+            },
+            {
+                "turn_index": 6,
+                "customer": "No, I'm not interested in that.",
+                "reply": "No problem. Thank you for your time. Have a good day.",
+                "stage": "closed",
+                "stt_ms": 900,
+                "llm_ms": None,
+                "tts_ms": 800,
+            },
+        ],
+    }
+
+
+def test_open_answer_is_not_blamed_and_later_repeats_are():
+    measured = score_measured(_open_configuration_call())
+    fit = {item["turn_index"]: item["fit"] for item in measured["last_answer_fit"]}
+    assert fit[3] is True
+    assert fit[4] is True
+    assert fit[6] is True
+    assert measured["repeated_configuration_prompts"] == [5]
+    repeated = measured["repeated_questions"]
+    assert any(item["turn_index"] == 4 and item["first_turn_index"] == 1 for item in repeated)
+    assert any(item["turn_index"] == 5 for item in repeated)
+    assert all(item["turn_index"] != 3 for item in repeated)
+    change = recommended_change(measured)
+    assert change is not None
+    assert "did not answer" not in change
+    assert "turn 3" not in change
+
+
+def test_judge_prompt_allows_an_open_answer():
+    from local_call.judge import SYSTEM_PROMPT
+
+    assert "Leaving configuration, size, or budget open is correct" in SYSTEM_PROMPT
+    assert "stage answer_faq" in SYSTEM_PROMPT
+    assert 'Not interested in that' in SYSTEM_PROMPT
+    assert "Leave response time out of your scores." in SYSTEM_PROMPT
+    assert "same topic asked again" in SYSTEM_PROMPT
+    assert "one site-visit offer" in SYSTEM_PROMPT
+    assert "yes to highlights or documents is not a yes to a visit" in SYSTEM_PROMPT
+    assert "I don't need any details" in SYSTEM_PROMPT
+
+
+def test_a_stated_menu_is_a_repeat_and_a_no_fits():
+    record = {
+        "call_id": "menu",
+        "caller_model": "sarvam-105b-conversations",
+        "turns": [
+            {
+                "turn_index": 2,
+                "customer": "Yes.",
+                "reply": "Which configuration are you looking for?",
+                "stage": "qualify",
+            },
+            {
+                "turn_index": 4,
+                "customer": "As an investment.",
+                "reply": "SOBHA Townpark offers 1 to 4 BHK apartments. Would you like to hear about the kind of home?",
+                "stage": "answer_faq",
+            },
+            {
+                "turn_index": 7,
+                "customer": "You already asked that.",
+                "reply": "Would you like to hear about the amenities?",
+                "stage": "answer_faq",
+            },
+            {
+                "turn_index": 12,
+                "customer": "No, I am not.",
+                "reply": "We have one to four bedroom apartments available.",
+                "stage": "answer_faq",
+            },
+        ],
+    }
+    measured = score_measured(record)
+    assert measured["repeated_configuration_prompts"] == [4, 12]
+    fit = {item["turn_index"]: item["fit"] for item in measured["last_answer_fit"]}
+    assert fit[7] is True
+    assert fit[12] is True
+
+
+def _wav(loud_seconds, quiet_seconds=0.0, rate=16000):
+    import io
+    import math
+    import struct
+    import wave
+
+    samples = []
+    for index in range(int(rate * loud_seconds)):
+        samples.append(int(0.3 * 32767 * math.sin(2 * math.pi * 440 * index / rate)))
+    samples.extend([0] * int(rate * quiet_seconds))
+    raw = struct.pack("<" + "h" * len(samples), *samples)
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        wav.writeframes(raw)
+    return buffer.getvalue()
+
+
+def test_short_noise_is_not_sent_to_stt(monkeypatch):
+    import asyncio
+
+    from local_call.server import clip_has_speech, listen
+
+    short = _wav(0.15, 0.6)
+    longer = _wav(0.6, 0.4)
+    assert clip_has_speech(short) is False
+    assert clip_has_speech(longer) is True
+
+    def fail_post(*args, **kwargs):
+        raise AssertionError("Sarvam was called")
+
+    monkeypatch.setattr("local_call.server.requests.post", fail_post)
+
+    class _Upload:
+        async def read(self):
+            return short
+
+    assert asyncio.run(listen(_Upload())) == {"text": ""}
+
+
+def test_a_missed_goodbye_outranks_a_repeated_question():
+    record = {
+        "call_id": "ending",
+        "caller_model": "sarvam-105b-conversations",
+        "turns": [
+            {
+                "turn_index": 3,
+                "customer": "I haven't finalized it.",
+                "reply": "Which configuration interests you?",
+                "stage": "answer_faq",
+            },
+            {
+                "turn_index": 5,
+                "customer": "No, I am good.",
+                "reply": "Would you like to schedule a site visit to SOBHA Townpark?",
+                "stage": "propose_slot",
+            },
+            {
+                "turn_index": 7,
+                "customer": "I will let you know later.",
+                "reply": "Would you like me to share the highlights of the project?",
+                "stage": "propose_slot",
+            },
+            {
+                "turn_index": 12,
+                "customer": "No, I'm not interested.",
+                "reply": "Shall I share the details with you?",
+                "stage": "visit_day",
+            },
+        ],
+    }
+    measured = score_measured(record)
+    assert 5 not in measured["missed_closes"]
+    assert measured["missed_closes"] == [7, 12]
+    change = recommended_change(measured)
+    assert change.startswith("Close the call at turn 7.")
+    assert "Stop repeating" not in change
 
 
 def test_spoken_size_says_square_feet():
