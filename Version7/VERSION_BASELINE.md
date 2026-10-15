@@ -1,8 +1,14 @@
 # Version baseline
 
-Version: V6 frozen / V7 development
+Version: V7 frozen / V8 development
 
-`Version7/` is the development copy. `Version6/`, `Version5/`, `Version4/`, and `Version3/` stay frozen.
+`Version7/` is frozen as of 15 October 2026. It keeps the localhost architecture already in this folder: Sarvam as the caller, Sarvam speech-to-text, Sarvam Bulbul v3 speaker `ishita`, “sq. ft.” spoken as “square feet,” and speech that starts on the first clause. Neerja speaks only when Bulbul returns no audio. Do not modify `Version7/`, `Version6/`, `Version5/`, `Version4/`, or `Version3/`. Further development belongs in `Version8/`.
+
+The notes below record how Version 7 was built. They are historical.
+
+Version at the time of those notes: V6 frozen / V7 development
+
+`Version7/` was the development copy. `Version6/`, `Version5/`, `Version4/`, and `Version3/` stay frozen.
 
 Copied from `Version6/` on 13 October 2026, and only what the localhost call needs:
 
