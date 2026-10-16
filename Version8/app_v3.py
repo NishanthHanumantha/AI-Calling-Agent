@@ -1060,7 +1060,7 @@ def is_positive(text):
 def available_to_talk(text):
     """Greeting replies that mean the customer can continue, without the word yes."""
     text_lower = (text or "").lower()
-    if is_clear_negative(text_lower):
+    if is_clear_negative(text_lower) or asks_to_call_later(text_lower):
         return False
     phrases = (
         "can speak", "can talk", "speak now", "talk now", "good time",
@@ -1068,6 +1068,21 @@ def available_to_talk(text):
         "i am available", "listening", "carry on", "go on",
     )
     return any(phrase in text_lower for phrase in phrases)
+
+
+def asks_to_call_later(text):
+    """The customer cannot continue this call. A short hold is not a callback."""
+    low = (text or "").lower()
+    return re.search(
+        r"\bbusy\b"
+        r"|\bcall(?:\s+me)?\s+(?:later|back)\b"
+        r"|\bcallback\b"
+        r"|\bnot a good time\b"
+        r"|\bin a meeting\b"
+        r"|\bdriving\b"
+        r"|\b(?:can(?:not|'t)|can not)\s+(?:talk|speak)\b",
+        low,
+    ) is not None
 
 
 def wants_site_visit(text):
@@ -2678,7 +2693,7 @@ def close_or_offer_the_visit():
 
 def polite_stop(user_text):
     """Close when the customer is done with the project, the visit, or any details."""
-    if declines_the_project(user_text) or refuses_details(user_text):
+    if declines_the_project(user_text) or refuses_details(user_text) or asks_to_call_later(user_text):
         return advisor_followup_twiml()
     on_visit = conversation_memory.get("stage") in (
         "propose_slot", "visit_day", "visit_pick_slot",
@@ -2743,6 +2758,8 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
     print("MEMORY:", conversation_memory)
 
     if stage == "greeting":
+        if asks_to_call_later(user_text):
+            return advisor_followup_twiml()
         if is_positive(user_text) or available_to_talk(user_text):
             conversation_memory["stage"] = "qualify"
             twiml = f"""
@@ -2777,9 +2794,7 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
         if needs_time(user_text):
             return time_to_decide_twiml()
         if wants_site_visit(user_text):
-            conversation_memory["stage"] = "visit_day"
-            conversation_memory["slot_pick_retries"] = 0
-            return Response(content=visit_day_twiml(), media_type="application/xml")
+            return advisor_followup_twiml()
         if asks_about_the_visit(user_text):
             return offer_the_visit_once()
         if is_bare_configuration_word(user_text):
@@ -2832,9 +2847,7 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
             if yes_to_materials(user_text):
                 return share_details_twiml()
             if is_positive(user_text) or wants_site_visit(user_text):
-                conversation_memory["stage"] = "visit_day"
-                conversation_memory["slot_pick_retries"] = 0
-                return Response(content=visit_day_twiml(), media_type="application/xml")
+                return advisor_followup_twiml()
             if is_clear_negative(user_text):
                 return advisor_followup_twiml()
             conversation_memory["stage"] = "answer_faq"
@@ -2842,9 +2855,7 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
             return Response(content=twiml, media_type="application/xml")
 
         if wants_site_visit(user_text):
-            conversation_memory["stage"] = "visit_day"
-            conversation_memory["slot_pick_retries"] = 0
-            return Response(content=visit_day_twiml(), media_type="application/xml")
+            return advisor_followup_twiml()
         if asks_about_the_visit(user_text):
             return offer_the_visit_once()
 
@@ -2922,9 +2933,7 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
         if yes_to_materials(user_text):
             return share_details_twiml()
         if (is_positive(user_text) and last_question_is_visit()) or wants_site_visit(user_text):
-            conversation_memory["stage"] = "visit_day"
-            conversation_memory["slot_pick_retries"] = 0
-            return Response(content=visit_day_twiml(), media_type="application/xml")
+            return advisor_followup_twiml()
 
         if is_new_faq_question(user_text):
             conversation_memory["stage"] = "answer_faq"
@@ -2933,51 +2942,13 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
 
         return answer_in_place(user_text)
 
-    if stage == "visit_day":
+    if stage in ("visit_day", "visit_pick_slot"):
         stopped = polite_stop(user_text)
         if stopped:
             return stopped
         if needs_time(user_text):
             return time_to_decide_twiml()
-        opened = open_answer_response(user_text)
-        if opened:
-            return opened
-        if names_a_day(user_text):
-            conversation_memory["visit_day"] = chosen_day(user_text)
-            conversation_memory["stage"] = "visit_pick_slot"
-            return Response(content=visit_slot_choice_twiml(is_retry=False), media_type="application/xml")
-        return answer_in_place(user_text)
-
-    if stage == "visit_pick_slot":
-        stopped = polite_stop(user_text)
-        if stopped:
-            return stopped
-        if needs_time(user_text):
-            return time_to_decide_twiml()
-        opened = open_answer_response(user_text)
-        if opened:
-            return opened
-        slot = parse_bookable_slot(user_text)
-        if slot:
-            conversation_memory["selected_slot"] = slot
-            conversation_memory["visit_preference"] = f"{conversation_memory.get('visit_day')} {slot}"
-            conversation_memory["stage"] = "closed"
-            return Response(content=booking_confirmed_twiml(), media_type="application/xml")
-
-        conversation_memory["slot_pick_retries"] = conversation_memory.get("slot_pick_retries", 0) + 1
-        if conversation_memory["slot_pick_retries"] >= 3:
-            conversation_memory["stage"] = "closed"
-            return Response(
-                content=polite_exit_twiml(
-                    "I've noted your preferred day. Our sales advisor will fix the exact time with you. "
-                    "Thank you for your time. Have a great day."
-                ),
-                media_type="application/xml",
-            )
-        return answer_then_ask(
-            user_text,
-            f"We have these slots — {VISIT_SLOTS_SPOKEN}. Which one works best for you?",
-        )
+        return advisor_followup_twiml()
 
     conversation_memory["stage"] = "closed"
     return Response(

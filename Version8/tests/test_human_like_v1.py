@@ -416,10 +416,10 @@ def test_failed_distance_lookup_does_not_dump_amenities(monkeypatch):
         (
             "I want to schedule a site visit.",
             "answer_faq",
-            ["which day"],
-            "visit_day",
+            ["sales advisor", "have a good day"],
+            "closed",
             True,
-            1,
+            0,
             {},
         ),
         (
@@ -470,10 +470,10 @@ def test_failed_distance_lookup_does_not_dump_amenities(monkeypatch):
         (
             "I want to schedule a site visit.",
             "qualify",
-            ["which day"],
-            "visit_day",
+            ["sales advisor", "have a good day"],
+            "closed",
             True,
-            1,
+            0,
             {},
         ),
         (
@@ -553,6 +553,28 @@ def test_greeting_answers_a_hold_and_stays_open():
     assert "good time" in spoken.lower()
     assert "sq" not in spoken.lower()
     assert "lovely day" not in spoken.lower()
+
+
+def test_busy_or_call_later_closes_with_the_advisor():
+    for speech in ("No, I am busy. Can you call later?", "No, I am busy."):
+        app_v3.reset_memory()
+        CALLS.clear()
+        app_v3.conversation_memory["stage"] = "greeting"
+        spoken, _, stage = _turn(speech)
+        assert stage == "closed", speech
+        assert "sales advisor" in spoken.lower()
+        assert "have a good day" in spoken.lower()
+        assert "good time" not in spoken.lower()
+        assert CALLS == []
+
+    app_v3.reset_memory()
+    CALLS.clear()
+    app_v3.conversation_memory["stage"] = "qualify"
+    spoken, _, stage = _turn("Can you call me later?")
+    assert stage == "closed"
+    assert "sales advisor" in spoken.lower()
+    assert "have a good day" in spoken.lower()
+    assert CALLS == []
 
 
 def test_qualification_answers_a_hold_or_a_question():
@@ -972,16 +994,27 @@ def test_not_interested_closes_and_bare_okay_does_not_book():
     assert CALLS == []
 
     spoken, _, stage = _turn("Yes.")
-    assert stage == "visit_day"
-    assert "which day" in spoken.lower()
-
-    spoken, _, stage = _turn("Sunday.")
-    assert stage == "visit_pick_slot"
-    assert app_v3.conversation_memory["visit_day"] == "Sunday"
-    spoken, _, stage = _turn("6 p.m.")
     assert stage == "closed"
-    assert "Sunday, at 6:00 PM" in spoken
-    assert "Sunday.," not in spoken
+    assert "sales advisor" in spoken.lower()
+    assert "have a good day" in spoken.lower()
+    assert "which day" not in spoken.lower()
+    assert "ten a m" not in spoken.lower()
+    assert "booked for" not in spoken.lower()
+    assert CALLS == []
+
+    app_v3.reset_memory()
+    CALLS.clear()
+    app_v3.conversation_memory.update({
+        "stage": "visit_day",
+        "last_agent_question": "Which day would suit you best for the visit?",
+    })
+    spoken, _, stage = _turn("Sunday.")
+    assert stage == "closed"
+    assert "sales advisor" in spoken.lower()
+    assert "which day" not in spoken.lower()
+    assert "ten a m" not in spoken.lower()
+    assert "booked for" not in spoken.lower()
+    assert CALLS == []
 
 
 def test_greeting_location_is_not_offered_again():
@@ -1584,16 +1617,21 @@ def test_a_question_about_the_visit_offers_the_visit():
 
     spoken, _, stage = _turn("Yes.")
     assert CALLS == []
-    assert stage == "visit_day"
-    assert "which day" in spoken.lower()
+    assert stage == "closed"
+    assert "sales advisor" in spoken.lower()
+    assert "have a good day" in spoken.lower()
+    assert "which day" not in spoken.lower()
+    assert "ten a m" not in spoken.lower()
 
     app_v3.reset_memory()
     CALLS.clear()
     app_v3.conversation_memory.update({"stage": "answer_faq"})
     spoken, _, stage = _turn("I want to book a visit.")
     assert CALLS == []
-    assert stage == "visit_day"
-    assert "which day" in spoken.lower()
+    assert stage == "closed"
+    assert "sales advisor" in spoken.lower()
+    assert "which day" not in spoken.lower()
+    assert "ten a m" not in spoken.lower()
 
 
 def test_a_saturday_sentence_is_confirmed_as_the_day():
@@ -1604,14 +1642,26 @@ def test_a_saturday_sentence_is_confirmed_as_the_day():
     })
     spoken, _, stage = _turn("This Saturday would be fine.")
     assert CALLS == []
-    assert stage == "visit_pick_slot"
-    assert app_v3.conversation_memory["visit_day"] == "this Saturday"
-    assert "would be fine" not in spoken.lower()
+    assert stage == "closed"
+    low = spoken.lower()
+    assert "sales advisor" in low
+    assert "have a good day" in low
+    assert "which day" not in low
+    assert "ten a m" not in low
+    assert "booked for" not in low
 
+    app_v3.reset_memory()
+    CALLS.clear()
+    app_v3.conversation_memory.update({
+        "stage": "visit_pick_slot",
+        "visit_offered": True,
+        "last_agent_question": "Which one works best for you?",
+    })
     spoken, _, stage = _turn("4 p.m. would be fine.")
     assert CALLS == []
     assert stage == "closed"
     low = spoken.lower()
-    assert "booked for this saturday, at 4:00 pm" in low
-    assert "would be fine" not in low
+    assert "sales advisor" in low
+    assert "ten a m" not in low
+    assert "booked for" not in low
     assert "SOBHA" in app_v3.visit_schedule_question()
