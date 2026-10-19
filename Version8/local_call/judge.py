@@ -57,6 +57,7 @@ Different wording of the configuration menu is the same question. "Available con
 "Not interested in that" or "not interested in it" declines the last topic. Closing the call on that line fails intent_accuracy and action_accuracy. A bare "I'm not interested," with no "that" or "it," may still close the call.
 A repeated question is the same topic asked again. A new question, such as a layout question after the kind of home, is not a repeated question merely because the customer said the agent was repeating.
 A no to configuration or size alone may still be followed by one site-visit offer. Do not fail premature_site_visit for that single offer. A no to the project, "I will let you know later" about the visit, or "I don't need any details" must close with no further question. Asking again fails action_accuracy and conversation_quality. A yes to highlights or documents is not a yes to a visit. Booking a day after that yes fails action_accuracy and premature_site_visit.
+A yes to a visit, a request to book one, a named day, or a clock time closes with "I will have our sales advisor get in touch with you. Have a good day." and stage closed. Do not fail intent_accuracy, action_accuracy, conversation_stage_accuracy, or conversation_quality because no day was asked and the times 10:00 AM, 11:30 AM, 4:00 PM, and 6:00 PM were not listed. Asking which day or listing those times is the wrong next step. A no or "I will let you know later" about the visit closes the same way.
 
 Return JSON only:
 {

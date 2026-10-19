@@ -921,6 +921,8 @@ def generate_response(user_query, intent, brochure_context, top_score):
         "Each Luxe or Grande line is one range, not two separate sizes. "
         "Do not mention price or payment plans unless the customer asked about price or payment. "
         "Do not give a generic amenities list unless they asked about amenities. "
+        "Do not ask about open spaces, the clubhouse, or the swimming pool unless the customer asked about them. "
+        "Speak a percent only when that percent is written in the project knowledge or the brochure excerpts. "
         "Do not say 'certainly' or 'I would be happy to'. "
         "Use short spoken sentences, not a written paragraph. "
         "At most three short sentences and at most one question mark. "
@@ -984,7 +986,8 @@ def generate_response(user_query, intent, brochure_context, top_score):
             return safe_spoken_fallback(user_query, intent)
 
         spoken = leave_closed_size(user_query, drop_unasked_payment(user_query, cleaned_answer))
-        spoken = drop_unsupported_percent(spoken)
+        spoken = drop_unsupported_percent(spoken, f"{kb_section}\n{brochure_context}")
+        spoken = drop_unasked_amenity_question(user_query, spoken)
         spoken = leave_closed_configuration(user_query, spoken)
         spoken = drop_false_configuration_claim(spoken)
         spoken = leave_blocked_topics(spoken)
@@ -992,6 +995,8 @@ def generate_response(user_query, intent, brochure_context, top_score):
         spoken = drop_restated_theme(spoken)
         spoken = drop_question_just_answered(spoken)
         spoken = use_unit_sizes(user_query, spoken)
+        spoken = restore_denied_sizes(spoken)
+        spoken = drop_invented_floor_plan(spoken)
         spoken = limit_to_one_question(spoken) if spoken else ""
         spoken = fit_spoken_length(spoken) if spoken else ""
         return spoken or move_on_line()
@@ -1162,7 +1167,8 @@ SHARE_CLOSE = "I will arrange to share the details of the project with you. Have
 def refuses_details(text):
     """The customer does not want documents or any further project details."""
     return re.search(
-        r"\b(don'?t need|do not need|no need|not need).{0,24}\bdetails\b|\bno details\b",
+        r"\b(don'?t need|do not need|no need|not need|don'?t want|do not want)"
+        r".{0,24}\bdetails\b|\bno details\b",
         (text or "").lower(),
     ) is not None
 
@@ -1170,7 +1176,8 @@ def refuses_details(text):
 def defers_the_visit(text):
     """The customer is putting the visit off, not asking for another topic."""
     return re.search(
-        r"\b(let you know later|let me know later|i'?ll let you know|i will let you know)\b",
+        r"\b(let you know later|let me know later|i'?ll let you know|i will let you know|"
+        r"(?:come|get) back(?: to you)? later)\b",
         (text or "").lower(),
     ) is not None
 
@@ -1231,8 +1238,16 @@ def is_direct_project_question(text):
 
 
 def is_purpose_statement(text):
+    """Investment or living in the home. A named area is a location, not this."""
     text_lower = (text or "").lower()
-    return re.search(r"\b(investment|own use|end use|for myself|for my own)\b", text_lower) is not None
+    if re.search(r"\b(investment|own use|end use|for myself|for my own)\b", text_lower):
+        return True
+    if not re.search(r"\b(to live|live in|for living)\b", text_lower):
+        return False
+    if extract_locality(text):
+        return False
+    last = (conversation_memory.get("last_agent_question") or "").lower()
+    return "live in" in last or "investment" in last or "own use" in last
 
 
 def is_bare_configuration_word(text):
@@ -1300,7 +1315,7 @@ def note_purpose(text):
     low = (text or "").lower()
     if re.search(r"\binvestment\b", low):
         conversation_memory["customer_purpose"] = "investment"
-    elif re.search(r"\b(own use|end use|to live|live in)\b", low):
+    elif re.search(r"\b(own use|end use|to live|live in|for living)\b", low):
         conversation_memory["customer_purpose"] = "live"
     if conversation_memory.get("customer_purpose"):
         close_open_topic("purpose")
@@ -1376,7 +1391,11 @@ def remember_spoken(text):
         remember_covered("price")
     if re.search(r"\bamenities\b", text or "", re.I):
         remember_covered("amenities")
-    if re.search(r"\bwhat else can i help you with\b", text or "", re.I):
+    if re.search(
+        r"\bwhat else (?:can i help you with|would you like to know)\b",
+        text or "",
+        re.I,
+    ):
         conversation_memory["fallback_asked"] = True
     if re.search(r"\banything else about the project\b", text or "", re.I):
         conversation_memory["open_project_asked"] = True
@@ -1527,7 +1546,15 @@ def accept_offered_size(text):
         return
     config = conversation_memory.get("customer_configuration")
     if is_flexible_about_size(text):
-        variant = _variant_alone(conversation_memory.get("last_spoken_reply") or "") or larger_variant(config)
+        reply = conversation_memory.get("last_spoken_reply") or ""
+        both_named = re.search(r"\bluxe\b", reply, re.I) and re.search(r"\bgrande\b", reply, re.I)
+        both_accepted = re.search(
+            r"\b(fine with both|fine with either|both are fine|either is fine)\b",
+            (text or "").lower(),
+        )
+        if both_named and both_accepted:
+            return
+        variant = _variant_alone(reply) or larger_variant(config)
         if variant:
             conversation_memory["customer_variant"] = variant
             conversation_memory["size_decided"] = True
@@ -1624,10 +1651,10 @@ def next_question():
     for question in choices:
         if question != last:
             return question
-    return "What else can I help you with?"
+    return "What else would you like to know?"
 
 
-FALLBACK_QUESTION = "What else can I help you with?"
+FALLBACK_QUESTION = "What else would you like to know?"
 OFFER_THE_VISIT = object()
 
 
@@ -1668,9 +1695,9 @@ def reply_for_purpose(user_text):
         return None
     note_purpose(user_text)
     if conversation_memory.get("customer_purpose") == "live":
-        lead = "Understood. That works well for your own use."
+        lead = "Got it. You're looking at this for your own use."
     else:
-        lead = "Understood. That works well for an investment."
+        lead = "Got it. You're looking at this as an investment."
     conversation_memory["stage"] = "answer_faq"
     if conversation_memory.get("price_stated") or "price" in (
         conversation_memory.get("covered_topics") or []
@@ -1837,6 +1864,57 @@ def asks_what_it_means(text):
     return re.search(r"\bwhat does (?:it|that|this) mean\b", text or "", re.I) is not None
 
 
+def asks_for_a_floor_plan(text):
+    """A layout question. A bare 'what does it mean' counts only after a layout line."""
+    low = (text or "").lower()
+    if re.search(
+        r"\b(layout|floor\s*plan|floorplan|internal (?:zoning|joining)|zoning)\b",
+        low,
+    ):
+        return True
+    if not asks_what_it_means(text):
+        return False
+    last = " ".join(
+        part for part in (
+            conversation_memory.get("last_agent_question") or "",
+            conversation_memory.get("last_spoken_reply") or "",
+        ) if part
+    ).lower()
+    return re.search(r"\b(layout|floor\s*plan|floorplan|zoning|joining)\b", last) is not None
+
+
+def drop_invented_floor_plan(answer):
+    """Drop a model question about a layout, a floor plan, or zoning."""
+    kept = []
+    for sentence in split_sentences(answer or ""):
+        if "?" in sentence and re.search(
+            r"\b(layout|floor\s*plan|floorplan|zoning|joining)\b",
+            sentence,
+            re.I,
+        ):
+            continue
+        if re.search(r"\b(internal zoning|internal joining|zoning)\b", sentence, re.I):
+            continue
+        kept.append(sentence)
+    return " ".join(kept)
+
+
+def reply_for_floor_plan(user_text):
+    """The stored size is the floor-plan fact. The model does not invent one."""
+    if not asks_for_a_floor_plan(user_text):
+        return None
+    parts = []
+    config = conversation_memory.get("customer_configuration")
+    size = UNIT_SIZES.get(config or "")
+    last = conversation_memory.get("last_spoken_reply") or ""
+    numbers = re.findall(r"\d{3,4}", size or "")
+    if size and (not numbers or not all(number in last for number in numbers)):
+        parts.append(size.rstrip("."))
+    parts.append("I don't have a floor plan beyond that size.")
+    conversation_memory["stage"] = "answer_faq"
+    return follow_on(" ".join(parts))
+
+
 def move_on_line():
     """One next question. A second 'what else' offers the visit instead."""
     return follow_on("That's alright.")
@@ -1920,13 +1998,30 @@ def topic_just_asked():
     return topic_of_text(conversation_memory.get("last_agent_question") or "")
 
 
+def leaves_any_configuration(text):
+    """Any configuration is an open answer. It does not choose Luxe or Grande."""
+    return re.search(
+        r"\bany configuration\b|\bokay with any\b|\bfine with any\b",
+        (text or "").lower(),
+    ) is not None
+
+
+def asks_to_hear_about_the_project(text):
+    """They asked to hear about the project, not about one size."""
+    return re.search(
+        r"\b(?:about|regarding) the project\b",
+        (text or "").lower(),
+    ) is not None
+
+
 def leaves_fact_open(text):
     """The customer is not supplying the fact just asked."""
-    if is_unsure(text) or is_flexible_about_size(text):
+    if is_unsure(text) or is_flexible_about_size(text) or leaves_any_configuration(text):
         return True
     return re.search(
         r"\b(no preference|not decided|haven'?t decided|haven'?t finalized|"
         r"not finalized|yet to finalize|you tell me|you decide|"
+        r"decide(?:\s+this)?\s+later|"
         r"skip that|whatever you (?:think|suggest)|either way)\b",
         (text or "").lower(),
     ) is not None
@@ -1956,9 +2051,20 @@ def acknowledge_open(topic):
 
 def reply_for_open_answer(user_text):
     """Acknowledge an open answer before the model writes a reply. None when the model should answer."""
+    if leaves_any_configuration(user_text):
+        remember_open("configuration")
+        lead = "That's alright, we can leave the configuration open."
+        if asks_to_hear_about_the_project(user_text):
+            conversation_memory["stage"] = "answer_faq"
+            if conversation_memory.get("price_stated"):
+                return f"{lead} {OPEN_PROJECT_QUESTION}"
+            return f"{lead} {price_statement()}"
+        return acknowledge_open("configuration")
     if not leaves_fact_open(user_text) or not conversation_memory.get("last_agent_question"):
         return None
     topic = topic_just_asked()
+    if not topic and size_topic_open():
+        topic = "size"
     if topic == "size":
         if conversation_memory.get("size_decided"):
             conversation_memory["size_closed_before_turn"] = True
@@ -2036,16 +2142,100 @@ def sentence_lists_bhk_menu(sentence):
     return len(labels) >= 3
 
 
-def drop_unsupported_percent(answer):
-    """Drop a percent the project facts do not contain."""
-    facts = " ".join(str(value) for value in PROJECT_KB.values())
+_PERCENT_ONES = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19,
+}
+_PERCENT_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+}
+
+
+def _words_to_int(phrase):
+    """A percent spoken as words, such as sixty seven. None when it is not a number."""
+    parts = re.split(r"[-\s]+", (phrase or "").lower().strip())
+    if len(parts) == 1 and parts[0] in _PERCENT_ONES:
+        return _PERCENT_ONES[parts[0]]
+    if len(parts) == 1 and parts[0] in _PERCENT_TENS:
+        return _PERCENT_TENS[parts[0]]
+    if len(parts) == 2 and parts[0] in _PERCENT_TENS and parts[1] in _PERCENT_ONES:
+        return _PERCENT_TENS[parts[0]] + _PERCENT_ONES[parts[1]]
+    return None
+
+
+def _spoken_percent_numbers(sentence):
+    """The percents in one sentence, as digit strings."""
+    numbers = []
+    for match in re.finditer(r"\d+\s*(?:%|percent)", sentence or "", re.I):
+        digits = re.sub(r"\D", "", match.group(0))
+        if digits:
+            numbers.append(digits)
+    ones = "|".join(_PERCENT_ONES)
+    tens = "|".join(_PERCENT_TENS)
+    pattern = rf"\b((?:{tens})(?:[-\s](?:{ones}))?|(?:{ones}))\s+percent\b"
+    for match in re.finditer(pattern, sentence or "", re.I):
+        number = _words_to_int(match.group(1))
+        if number is not None:
+            numbers.append(str(number))
+    return numbers
+
+
+def _percent_in_source(number, source):
+    compact = re.sub(r"\s+", "", (source or "").lower())
+    return f"{number}%" in compact or f"{number}percent" in compact
+
+
+def drop_unsupported_percent(answer, source=None):
+    """Drop a percent the project facts and the retrieved brochure passage do not contain."""
+    facts = source if source is not None else " ".join(
+        str(value) for value in PROJECT_KB.values()
+    )
     kept = []
     for sentence in split_sentences(answer):
-        percents = re.findall(r"\d+\s*%", sentence)
-        if any(percent.replace(" ", "") not in facts.replace(" ", "") for percent in percents):
+        numbers = _spoken_percent_numbers(sentence)
+        if any(not _percent_in_source(number, facts) for number in numbers):
             continue
         kept.append(sentence)
     return " ".join(kept)
+
+
+def asks_about_an_amenity(text):
+    """Open space, the clubhouse, the pool, or the amenities list."""
+    return re.search(
+        r"\b(amenities|amenity|open spaces?|club\s*house|swimming pools?|pools?)\b",
+        text or "",
+        re.I,
+    ) is not None
+
+
+def drop_unasked_amenity_question(user_query, answer):
+    """Do not offer an amenity. A question about one is answered, not followed by another."""
+    asked = asks_about_an_amenity(user_query) or (
+        asks_about_an_amenity(conversation_memory.get("last_agent_question") or "")
+        and (is_positive(user_query) or asks_what_it_means(user_query))
+    )
+    kept = []
+    removed = False
+    for sentence in split_sentences(answer or ""):
+        if "?" in sentence and asks_about_an_amenity(sentence):
+            removed = True
+            continue
+        kept.append(sentence)
+    spoken = " ".join(kept)
+    if not spoken and removed:
+        conversation_memory["open_project_asked"] = True
+        return OPEN_PROJECT_QUESTION
+    if removed and spoken and "?" not in spoken and not conversation_memory.get("open_project_asked"):
+        conversation_memory["open_project_asked"] = True
+        return f"{spoken} {OPEN_PROJECT_QUESTION}"
+    if asked and spoken and "?" not in spoken and not conversation_memory.get("open_project_asked"):
+        conversation_memory["open_project_asked"] = True
+        return f"{spoken} {OPEN_PROJECT_QUESTION}"
+    return spoken
 
 
 def leave_closed_configuration(user_query, answer):
@@ -2257,6 +2447,41 @@ def use_unit_sizes(user_query, answer):
     return " ".join(rebuilt)
 
 
+def restore_denied_sizes(answer):
+    """A stored size is not 'not listed'. Keep that line and ask the open question."""
+    config = conversation_memory.get("customer_configuration")
+    stored = UNIT_SIZES.get(config or "")
+    if not stored or not answer:
+        return answer
+    sentences = split_sentences(answer)
+    denied = False
+    kept = []
+    for sentence in sentences:
+        denies = re.search(
+            r"\b(not listed|not available|are not here|is not here)\b",
+            sentence,
+            re.I,
+        ) and re.search(r"\b(size|sizes|sq|bhk|luxe|grande)\b", sentence, re.I)
+        if denies:
+            denied = True
+            continue
+        if re.search(r"\b(share|details)\b", sentence, re.I):
+            kept.append(sentence)
+            continue
+        kept.append(sentence)
+    if not denied:
+        return answer
+    kept = [
+        sentence for sentence in kept
+        if not re.search(r"\b(share|details)\b", sentence, re.I)
+    ]
+    conversation_memory["open_project_asked"] = True
+    body = " ".join(kept).strip()
+    if body:
+        return f"{body} {stored} {OPEN_PROJECT_QUESTION}"
+    return f"{stored} {OPEN_PROJECT_QUESTION}"
+
+
 def drop_unasked_payment(user_query, answer):
     """A size choice should not be turned into a payment pitch."""
     if not answers_size_question(user_query):
@@ -2304,6 +2529,13 @@ def answering_last_question(text):
 
 def turn_intent(user_text):
     """A short reply keeps the topic of the question just asked."""
+    if asks_about_an_amenity(user_text):
+        return "amenities"
+    last = conversation_memory.get("last_agent_question") or ""
+    if asks_about_an_amenity(last) and (
+        is_positive(user_text) or asks_what_it_means(user_text)
+    ):
+        return "amenities"
     if answering_last_question(user_text) and conversation_memory.get("last_intent"):
         return conversation_memory["last_intent"]
     return detect_intent(user_text)
@@ -2793,6 +3025,9 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
             return stopped
         if needs_time(user_text):
             return time_to_decide_twiml()
+        floor = response_for(reply_for_floor_plan(user_text))
+        if floor:
+            return floor
         if wants_site_visit(user_text):
             return advisor_followup_twiml()
         if asks_about_the_visit(user_text):
@@ -2835,6 +3070,9 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
             return stopped
         if needs_time(user_text):
             return time_to_decide_twiml()
+        floor = response_for(reply_for_floor_plan(user_text))
+        if floor:
+            return floor
         if conversation_memory.get("awaiting_visit_decision"):
             conversation_memory["awaiting_visit_decision"] = False
             opened = open_answer_response(user_text)
@@ -2920,6 +3158,9 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
             return stopped
         if needs_time(user_text):
             return time_to_decide_twiml()
+        floor = response_for(reply_for_floor_plan(user_text))
+        if floor:
+            return floor
         declined = response_for(reply_for_declined_topic(user_text))
         if declined:
             return declined

@@ -495,7 +495,7 @@ def test_customer_turn(speech, stage, points, expect_stage, ack_optional, max_qu
         "stage": expect_stage,
         "ack_optional": ack_optional,
         "max_questions": max_questions,
-        "ack": ("understand", "understood"),
+        "ack": ("understand", "understood", "got it"),
     }
     scores = _score(case, spoken, got_stage)
     CASES.append((speech, spoken, got_stage, scores))
@@ -710,6 +710,44 @@ def test_flexible_yes_closes_the_size_and_the_next_reply_leaves_it():
     assert "live in" in low
 
 
+def test_fine_with_both_ranges_leaves_the_size_open():
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "customer_configuration": "2 BHK",
+        "last_agent_question": "Which of these two ranges interests you more?",
+        "last_spoken_reply": (
+            "For 2 BHK, we have Luxe at 1240 to 1248 sq. ft. and Grande at 1337 to 1678 sq. ft. "
+            "Which of these two ranges interests you more?"
+        ),
+    })
+    spoken, _, stage = _turn("I'm fine with both.")
+    assert CALLS == []
+    assert stage == "answer_faq"
+    assert app_v3.conversation_memory["size_decided"] is False
+    assert app_v3.conversation_memory["customer_variant"] is None
+    low = spoken.lower()
+    assert "leave the size open" in low
+    assert "grande" not in low
+    assert "live in" in low
+
+
+def test_for_living_is_the_purpose_line():
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "customer_configuration": "2 BHK",
+        "last_agent_question": "Are you looking at this to live in, or as an investment?",
+    })
+    spoken, _, stage = _turn("It's for living.")
+    assert CALLS == []
+    assert stage == "answer_faq"
+    assert app_v3.conversation_memory["customer_purpose"] == "live"
+    low = spoken.lower()
+    assert "own use" in low
+    assert "1.8 crore" in low
+    assert "grande" not in low
+    assert "?" not in spoken
+
+
 def test_fine_with_both_confirms_the_four_bhk_range_on_the_same_turn():
     app_v3.conversation_memory.update({
         "stage": "answer_faq",
@@ -867,14 +905,16 @@ def test_open_configuration_is_not_asked_again():
         "Would you prefer a smaller or larger layout for your family?"
     )
     spoken, _, stage = _turn("To live in.")
+    assert CALLS == []
     assert stage == "answer_faq"
     low = spoken.lower()
-    assert "living in it makes sense" in low
+    assert "own use" in low
+    assert "1.8 crore" in low
     assert "1, 2, 3" not in low
     assert "smaller or larger" not in low
     assert "which configuration" not in low
     assert "bhk" not in low
-    assert low.count("?") == 1
+    assert "?" not in spoken
 
     app_v3.conversation_memory.update({
         "open_topics": ["configuration"],
@@ -1037,13 +1077,14 @@ def test_greeting_location_is_not_offered_again():
         "Would you like to know about the location?"
     )
     spoken, _, stage = _turn("To live in.")
+    assert CALLS == []
     assert stage == "answer_faq"
     low = spoken.lower()
-    assert "living in is the perfect fit" in low
+    assert "own use" in low
+    assert "1.8 crore" in low
     assert "location" not in low
     assert "kind of home" not in low
     assert "new york" not in low
-    assert "starting price" in low
     assert "configuration" not in low
 
 
@@ -1589,7 +1630,7 @@ def test_unsure_after_the_open_question_offers_the_visit():
         "fallback_asked": True,
         "customer_purpose": "investment",
         "covered_topics": ["location", "home", "price", "amenities"],
-        "last_agent_question": "What else can I help you with?",
+        "last_agent_question": "What else would you like to know?",
     })
     spoken, _, stage = _turn("I'm not sure about this.")
     assert CALLS == []
@@ -1632,6 +1673,182 @@ def test_a_question_about_the_visit_offers_the_visit():
     assert "sales advisor" in spoken.lower()
     assert "which day" not in spoken.lower()
     assert "ten a m" not in spoken.lower()
+
+
+def test_come_back_later_closes_the_visit():
+    app_v3.conversation_memory.update({
+        "stage": "propose_slot",
+        "visit_offered": True,
+        "last_agent_question": "Would you like to schedule a site visit to SOBHA Townpark?",
+    })
+    spoken, _, stage = _turn("I will come back to you later.")
+    assert CALLS == []
+    assert stage == "closed"
+    assert "sales advisor" in spoken.lower()
+    assert "?" not in spoken
+
+
+def test_a_refusal_of_details_closes():
+    app_v3.conversation_memory.update({
+        "stage": "propose_slot",
+        "visit_offered": True,
+        "last_agent_question": "Would you like me to share the available details for later?",
+    })
+    spoken, _, stage = _turn("No, I don't want any details.")
+    assert CALLS == []
+    assert stage == "closed"
+    assert "sales advisor" in spoken.lower()
+    assert "?" not in spoken
+
+
+def test_any_configuration_stays_open():
+    app_v3.conversation_memory.update({
+        "stage": "qualify",
+        "configuration_asked": True,
+        "last_agent_question": "Which configuration are you looking for?",
+    })
+    spoken, _, _stage = _turn("I am okay with any configuration.")
+    assert CALLS == []
+    low = spoken.lower()
+    assert "leave the configuration open" in low
+    assert "754" not in low
+    assert "1240" not in low
+
+
+def test_any_configuration_and_the_project_states_the_price():
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "configuration_asked": True,
+        "open_topics": ["configuration"],
+        "last_agent_question": "Which one interests you?",
+    })
+    spoken, _, _stage = _turn(
+        "Again, I am okay with any configuration. You can let me know about the project."
+    )
+    assert CALLS == []
+    low = spoken.lower()
+    assert "leave the configuration open" in low
+    assert "1.8" in low
+    assert "754" not in low
+    assert "1240" not in low
+
+
+def test_a_layout_question_does_not_invent_a_floor_plan():
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "customer_configuration": "1 BHK",
+        "last_spoken_reply": "The 1 BHK Luxe is 754 sq. ft. Would you like to know more about the layout?",
+        "last_agent_question": "Would you like to know more about the layout?",
+    })
+    spoken, _, _stage = _turn("What's the layout?")
+    assert CALLS == []
+    low = spoken.lower()
+    assert "floor plan" in low
+    assert "zoning" not in low
+    assert "joining" not in low
+    assert "754" not in spoken
+
+    app_v3.reset_memory()
+    CALLS.clear()
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "customer_configuration": "1 BHK",
+        "last_spoken_reply": "Would you like to know about the internal zoning?",
+        "last_agent_question": "Would you like to know about the internal zoning?",
+    })
+    spoken, _, _stage = _turn("What does internal joining mean?")
+    assert CALLS == []
+    low = spoken.lower()
+    assert "floor plan" in low
+    assert "754" in spoken
+    assert "zoning" not in low
+    assert "seamless" not in low
+
+
+def test_a_model_layout_question_is_dropped():
+    spoken = app_v3.drop_invented_floor_plan(
+        "The 1 BHK Luxe is 754 sq. ft. Would you like to know about the internal zoning?"
+    )
+    assert "754" in spoken
+    assert "zoning" not in spoken.lower()
+    assert "?" not in spoken
+
+
+def test_to_live_in_is_a_purpose_not_an_amenity():
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "customer_configuration": "3 BHK",
+        "last_agent_question": "Are you looking at this to live in, or as an investment?",
+    })
+    spoken, _, stage = _turn("It's to live in.")
+    assert CALLS == []
+    assert stage == "answer_faq"
+    assert app_v3.conversation_memory["customer_purpose"] == "live"
+    low = spoken.lower()
+    assert "own use" in low
+    assert "1.8 crore" in low
+    assert "open space" not in low
+    assert "clubhouse" not in low
+    assert "?" not in spoken
+
+
+def test_a_worded_percent_is_dropped_unless_the_source_has_it():
+    dropped = app_v3.drop_unsupported_percent(
+        "Sixty seven percent of the total area is open space. "
+        "Would you like to know the starting price?"
+    )
+    assert "percent" not in dropped.lower()
+    assert "starting price" in dropped.lower()
+    kept = app_v3.drop_unsupported_percent(
+        "Sixty seven percent of the total area is open space.",
+        "The brochure says 67% of the land is open.",
+    )
+    assert "sixty seven percent" in kept.lower()
+
+
+def test_an_unasked_clubhouse_question_is_replaced():
+    spoken = app_v3.drop_unasked_amenity_question(
+        "It's to live in.",
+        "Noted. Would you like to know about the clubhouse and swimming pool facilities?",
+    )
+    low = spoken.lower()
+    assert "clubhouse" not in low
+    assert "swimming" not in low
+    assert "anything else about the project" in low
+
+
+def test_decide_later_leaves_the_size_open():
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "customer_configuration": "3 BHK",
+        "last_spoken_reply": (
+            "For 3 BHK, Luxe is 1506 to 1514 sq. ft. and Grande is 1842 to 2547 sq. ft. "
+            "Which one interests you?"
+        ),
+        "last_agent_question": "Which one interests you?",
+    })
+    spoken, _, stage = _turn("I will decide this later after seeing.")
+    assert CALLS == []
+    assert stage == "answer_faq"
+    low = spoken.lower()
+    assert "leave the size open" in low
+    assert "not listed" not in low
+    assert "live in" in low
+
+
+def test_a_denial_of_listed_sizes_is_replaced():
+    app_v3.conversation_memory["customer_configuration"] = "3 BHK"
+    spoken = app_v3.restore_denied_sizes(
+        "Noted. For the 3 BHK, the available sizes are not listed here. "
+        "Would you like me to share the other details?"
+    )
+    low = spoken.lower()
+    assert "not listed" not in low
+    assert "1506" in spoken
+    assert "1842" in spoken
+    assert "2547" in spoken
+    assert "share" not in low
+    assert "anything else about the project" in low
 
 
 def test_a_saturday_sentence_is_confirmed_as_the_day():

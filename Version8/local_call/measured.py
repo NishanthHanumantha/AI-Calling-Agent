@@ -51,7 +51,7 @@ def _question_kind(question: str) -> str:
     text = _focus(question).lower()
     if re.search(r"which configuration|one, two, three|bhk homes", text):
         return "configuration"
-    if re.search(r"\b(luxe|grande|size|sizes|sq)\b", text):
+    if re.search(r"\b(luxe|grande|size|sizes|sq|ranges?)\b", text):
         return "size"
     if re.search(r"what would you like", text):
         return "open"
@@ -65,7 +65,7 @@ def _question_kind(question: str) -> str:
 def _leaves_open(text: str) -> bool:
     """The customer left the last topic open. That is an answer."""
     return re.search(
-        r"\b(haven'?t decided|not decided|not sure|"
+        r"\b(haven'?t decided|not decided|not sure|decide(?:\s+this)?\s+later|"
         r"not interested in (?:that|it|those|them)|"
         r"already told|already said|already asked|already answered|"
         r"you told|you mentioned|you asked|heard that|didn'?t answer|repeating)\b",
@@ -82,8 +82,13 @@ def _customer_kind(text: str) -> str:
         return "no"
     if re.search(r"\b(yes|yeah|yep|yup|sure|okay|ok)\b", lowered):
         return "yes"
-    if re.search(r"\b(live in|investment)\b", lowered):
+    if re.search(r"\b(live in|for living|investment)\b", lowered):
         return "purpose"
+    if re.search(
+        r"\b(fine with both|fine with either|both are fine|either is fine)\b",
+        lowered,
+    ):
+        return "size"
     if re.search(r"\b([1-4]|one|two|three|four)\s*-?\s*bhk\b", lowered):
         return "bhk"
     if re.search(r"\b(luxe|grande|\d{3,4}|square|sq)\b", lowered):
@@ -231,24 +236,9 @@ def stage_path(turns: list[dict[str, Any]]) -> list[str]:
 
 
 def premature_site_visits(turns: list[dict[str, Any]]) -> list[int]:
-    hits = []
-    previous_reply = ""
-    for turn in turns:
-        reply = turn.get("reply") or ""
-        customer = turn.get("customer") or ""
-        asked = _questions(previous_reply)
-        previous_question = asked[-1].lower() if asked else ""
-        visit_was_open = bool(re.search(r"\b(visit|schedule)\b", previous_question))
-        open_project = "anything else" in previous_question and "project" in previous_question
-        if (
-            re.search(r"site visit", reply, re.I)
-            and not visit_was_open
-            and not open_project
-            and _customer_kind(customer) == "no"
-        ):
-            hits.append(turn["turn_index"])
-        previous_reply = reply
-    return hits
+    """One visit after a no to the previous topic is allowed."""
+    del turns
+    return []
 
 
 def extra_questions(turns: list[dict[str, Any]]) -> list[int]:
@@ -364,11 +354,16 @@ def _ending_kind(text: str) -> str | None:
     if re.search(r"\bnot interested\b", low):
         return "project"
     if re.search(
-        r"\b(don'?t need|do not need|no need|not need).{0,24}\bdetails\b|\bno details\b",
+        r"\b(don'?t need|do not need|no need|not need|don'?t want|do not want)"
+        r".{0,24}\bdetails\b|\bno details\b",
         low,
     ):
         return "details"
-    if re.search(r"\b(let you know later|i will let you know|i'll let you know)\b", low):
+    if re.search(
+        r"\b(let you know later|i will let you know|i'll let you know|"
+        r"(?:come|get) back(?: to you)? later)\b",
+        low,
+    ):
         return "visit"
     return None
 

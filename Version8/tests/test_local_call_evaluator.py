@@ -92,7 +92,7 @@ def test_measured_scores_cover_the_call():
     assert measured["latency"]["llm"]["avg_ms"] == 8730
     assert measured["stage_path"] == ["greeting", "qualify", "answer_faq", "propose_slot"]
     assert [item["turn_index"] for item in measured["repeated_questions"]] == [3, 5]
-    assert measured["premature_site_visits"] == [6]
+    assert measured["premature_site_visits"] == []
     assert measured["repeated_configuration_prompts"] == [3]
     fit = {item["turn_index"]: item["fit"] for item in measured["last_answer_fit"]}
     assert fit[2] is True
@@ -263,6 +263,72 @@ def test_open_answer_is_not_blamed_and_later_repeats_are():
     assert "turn 3" not in change
 
 
+def test_for_living_fits_the_purpose_question():
+    measured = score_measured({
+        "turns": [
+            {
+                "turn_index": 4,
+                "customer": "I'm fine with both.",
+                "reply": "Are you looking at this to live in, or as an investment?",
+                "stage": "answer_faq",
+            },
+            {
+                "turn_index": 5,
+                "customer": "It's for living.",
+                "reply": "Got it. You're looking at this for your own use.",
+                "stage": "answer_faq",
+            },
+        ],
+    })
+    fit = {item["turn_index"]: item["fit"] for item in measured["last_answer_fit"]}
+    assert fit[5] is True
+
+
+def test_decide_later_fits_the_size_question():
+    measured = score_measured({
+        "turns": [
+            {
+                "turn_index": 3,
+                "customer": "3 BHK.",
+                "reply": "Which one interests you?",
+                "stage": "answer_faq",
+            },
+            {
+                "turn_index": 4,
+                "customer": "I will decide this later after seeing.",
+                "reply": (
+                    "That's alright, we can leave the size open. "
+                    "Are you looking at this to live in, or as an investment?"
+                ),
+                "stage": "answer_faq",
+            },
+        ],
+    })
+    fit = {item["turn_index"]: item["fit"] for item in measured["last_answer_fit"]}
+    assert fit[4] is True
+
+
+def test_fine_with_both_fits_the_size_question():
+    measured = score_measured({
+        "turns": [
+            {
+                "turn_index": 3,
+                "customer": "Maybe 3 BHK.",
+                "reply": "Which of these two ranges interests you more?",
+                "stage": "answer_faq",
+            },
+            {
+                "turn_index": 4,
+                "customer": "I'm fine with both.",
+                "reply": "That's alright. Are you looking at this to live in, or as an investment?",
+                "stage": "answer_faq",
+            },
+        ],
+    })
+    fit = {item["turn_index"]: item["fit"] for item in measured["last_answer_fit"]}
+    assert fit[4] is True
+
+
 def test_judge_prompt_allows_an_open_answer():
     from local_call.judge import SYSTEM_PROMPT
 
@@ -274,6 +340,8 @@ def test_judge_prompt_allows_an_open_answer():
     assert "one site-visit offer" in SYSTEM_PROMPT
     assert "yes to highlights or documents is not a yes to a visit" in SYSTEM_PROMPT
     assert "I don't need any details" in SYSTEM_PROMPT
+    assert "A yes to a visit, a request to book one, a named day, or a clock time" in SYSTEM_PROMPT
+    assert "Asking which day or listing those times is the wrong next step" in SYSTEM_PROMPT
 
 
 def test_a_stated_menu_is_a_repeat_and_a_no_fits():
@@ -501,16 +569,18 @@ def test_speaking_style_follows_the_clause():
     from local_call.server import BULBUL_SPEAKER, speaking_style
 
     assert BULBUL_SPEAKER == "ishita"
-    assert speaking_style("Hi, this is Sobha Limited calling.") == (0.95, 0.75)
-    assert speaking_style("Thanks for taking the call.") == (0.95, 0.75)
-    assert speaking_style("2 BHK Luxe is 1240 to 1248 square feet.") == (0.95, 0.55)
-    assert speaking_style("Would you like to know the starting price?") == (0.95, 0.55)
-    assert speaking_style("Would you like to schedule a site visit?") == (1.05, 0.65)
-    assert speaking_style(
-        "I will have our sales advisor get in touch with you."
-    ) == (0.9, 0.7)
-    assert speaking_style("Have a good day.") == (0.9, 0.7)
-    assert speaking_style("Are you looking at this to live in, or as an investment?") == (1.0, 0.7)
+    lines = (
+        "Hi, this is Sobha Limited calling.",
+        "Thanks for taking the call.",
+        "2 BHK Luxe is 1240 to 1248 square feet.",
+        "Would you like to know the starting price?",
+        "Would you like to schedule a site visit?",
+        "I will have our sales advisor get in touch with you.",
+        "Have a good day.",
+        "Are you looking at this to live in, or as an investment?",
+    )
+    for line in lines:
+        assert speaking_style(line) == (1.0, 0.6)
 
 
 def test_spoken_size_says_square_feet():

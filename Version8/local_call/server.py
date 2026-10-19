@@ -81,7 +81,6 @@ def project_facts():
     return {
         "project": app_v3.PROJECT_KB,
         "sizes": app_v3.UNIT_SIZES,
-        "slots": list(app_v3.BOOKABLE_SLOTS),
     }
 
 
@@ -181,43 +180,35 @@ def list_clauses(turn: Turn):
 
 
 def speaking_style(text):
-    """Pace and warmth for one clause. The speaker stays Ishita."""
-    raw = text or ""
-    low = raw.lower()
-    if re.search(r"\b(good day|goodbye|good bye|sales advisor|lovely day)\b", low):
-        return 0.9, 0.7
-    if re.search(r"\b(site visit|which day|what time|slot|schedule)\b", low) or (
-        "?" in raw and re.search(r"\bvisit\b", low)
-    ):
-        return 1.05, 0.65
-    if re.search(r"\b(thank you|thanks|good time)\b", low) or re.search(r"^\s*hi\b", low):
-        return 0.95, 0.75
-    if re.search(r"\b(bhk|sq\.?\s*ft|square feet|price|crore|sizes?)\b", low):
-        return 0.95, 0.55
-    return 1.0, 0.7
+    """One pace and warmth for every clause. The speaker stays Ishita."""
+    return 1.0, 0.6
 
 
-def bulbul_audio(text, pace, temperature):
+def bulbul_audio(text):
     """One spoken reply from Sarvam Bulbul. None when the call does not return audio."""
     if not app_v3.SARVAM_API_KEY:
         return None
-    response = requests.post(
-        BULBUL_URL,
-        headers={
-            "api-subscription-key": app_v3.SARVAM_API_KEY,
-            "Content-Type": "application/json",
-        },
-        json={
-            "text": text[:2500],
-            "language_code": "en-IN",
-            "model": BULBUL_MODEL,
-            "speaker": BULBUL_SPEAKER,
-            "pace": pace,
-            "temperature": temperature,
-            "speech_sample_rate": 22050,
-        },
-        timeout=30,
-    )
+    try:
+        response = requests.post(
+            BULBUL_URL,
+            headers={
+                "api-subscription-key": app_v3.SARVAM_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={
+                "text": text[:2500],
+                "language_code": "en-IN",
+                "model": BULBUL_MODEL,
+                "speaker": BULBUL_SPEAKER,
+                "pace": 1.0,
+                "temperature": 0.6,
+                "speech_sample_rate": 22050,
+            },
+            timeout=4,
+        )
+    except requests.Timeout:
+        print("LOCAL TTS STATUS: timeout")
+        return None
     if response.status_code != 200:
         message = ""
         try:
@@ -256,8 +247,7 @@ async def speak_reply(turn: Turn):
     if not text:
         return Response(status_code=400)
     started = time.perf_counter()
-    pace, temperature = speaking_style(text)
-    audio = bulbul_audio(text, pace, temperature)
+    audio = bulbul_audio(text)
     media = "audio/wav"
     voice = "bulbul-ishita"
     if not audio:
