@@ -135,6 +135,22 @@
       return session;
     }
 
+    let voiceCtx = null;
+
+    function unlockVoice() {
+      const Context = window.AudioContext || window.webkitAudioContext;
+      if (!Context) return null;
+      if (!voiceCtx) voiceCtx = new Context();
+      const pending = voiceCtx.resume();
+      if (pending && pending.catch) pending.catch(() => {});
+      const silent = voiceCtx.createBuffer(1, 1, voiceCtx.sampleRate);
+      const node = voiceCtx.createBufferSource();
+      node.buffer = silent;
+      node.connect(voiceCtx.destination);
+      try { node.start(); } catch (error) {}
+      return voiceCtx;
+    }
+
     function playClip(line, clip) {
       return new Promise((resolve) => {
         let settled = false;
@@ -143,38 +159,75 @@
           settled = true;
           resolve(outcome);
         };
-        const audio = clip.audio;
         const url = clip.url;
+        const audio = {
+          paused: true,
+          ended: false,
+          _stop: false,
+          _source: null,
+          pause() {
+            if (this.paused) return;
+            this.paused = true;
+            this._stop = true;
+            if (this._source) {
+              try { this._source.stop(); } catch (error) {}
+            }
+          }
+        };
+        clip.audio = audio;
         currentAudio = audio;
         const session = { audio, url, line, finish, closed: false };
         liveSpeech = session;
-        audio.onended = () => {
-          if (settled || liveSpeech !== session) return;
-          session.closed = true;
-          if (capture && capture.phase === "interrupt") releaseMic();
-          URL.revokeObjectURL(url);
-          if (currentAudio === audio) currentAudio = null;
-          liveSpeech = null;
-          finish("finished");
-        };
-        audio.onerror = () => {
-          if (settled) return;
-          URL.revokeObjectURL(url);
-          if (currentAudio === audio) currentAudio = null;
-          if (liveSpeech === session) liveSpeech = null;
-          finish("finished");
-        };
-        const started = audio.play();
-        const watch = () => armBargeIn(session);
         const giveUp = () => {
           session.closed = true;
           URL.revokeObjectURL(url);
           if (currentAudio === audio) currentAudio = null;
           if (liveSpeech === session) liveSpeech = null;
+          setStatus("The browser blocked the voice. Click Start again.");
           finish("finished");
         };
-        if (started && started.then) started.then(watch).catch(giveUp);
-        else watch();
+        const ctx = voiceCtx || unlockVoice();
+        if (!ctx || !clip.blob) {
+          giveUp();
+          return;
+        }
+        clip.blob.arrayBuffer().then((bytes) => ctx.decodeAudioData(bytes.slice(0))).then((buffer) => {
+          if (settled || !active || liveSpeech !== session) {
+            URL.revokeObjectURL(url);
+            return;
+          }
+          const startNode = () => {
+            if (settled || !active || liveSpeech !== session) return;
+            const source = ctx.createBufferSource();
+            audio._source = source;
+            source.buffer = buffer;
+            source.connect(ctx.destination);
+            source.onended = () => {
+              audio.ended = true;
+              audio.paused = true;
+              if (audio._stop || settled || liveSpeech !== session) return;
+              session.closed = true;
+              if (capture && capture.phase === "interrupt") releaseMic();
+              URL.revokeObjectURL(url);
+              if (currentAudio === audio) currentAudio = null;
+              liveSpeech = null;
+              finish("finished");
+            };
+            audio.paused = false;
+            try {
+              source.start();
+            } catch (error) {
+              giveUp();
+              return;
+            }
+            armBargeIn(session);
+          };
+          const resumed = ctx.resume();
+          if (resumed && resumed.then) resumed.then(startNode).catch(giveUp);
+          else startNode();
+        }).catch(() => {
+          if (!settled) giveUp();
+        });
       });
     }
 
@@ -228,7 +281,7 @@
           URL.revokeObjectURL(url);
           return null;
         }
-        return { audio: new Audio(url), url };
+        return { audio: null, url, blob };
       }).catch(() => null);
     }
 
@@ -236,7 +289,7 @@
       while (job && playback === job && !job.stopped && job.index < job.clauses.length) {
         let clip = job.current;
         job.current = null;
-        if (clip && clip.audio.ended) clip = null;
+        if (clip && clip.audio && clip.audio.ended) clip = null;
         if (!clip && job.upcoming) {
           const ready = await job.upcoming;
           job.upcoming = null;
@@ -517,10 +570,7 @@
               capture.calibrated = true;
               capture.loudBuffers = 0;
               const opening = interruptThreshold(capture);
-              capture.room.forEach((value) => {
-                if (value > opening) capture.loudBuffers += 1;
-                else capture.loudBuffers = 0;
-              });
+              capture.loudBuffers = 0;
             }
           } else if (level > interruptThreshold(capture)) {
             capture.loudBuffers += 1;
@@ -707,6 +757,7 @@
         return;
       }
       logEl.replaceChildren();
+      unlockVoice();
       active = true;
       startBtn.disabled = true;
       hangupBtn.disabled = false;

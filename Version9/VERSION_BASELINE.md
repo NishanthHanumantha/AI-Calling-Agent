@@ -1,8 +1,14 @@
 # Version baseline
 
-Version: V8 frozen / V9 development
+Version: V9 frozen / V10 development
 
-`Version9/` is the development copy. `Version8/`, `Version7/`, `Version6/`, `Version5/`, `Version4/`, and `Version3/` stay frozen.
+`Version9/` is frozen as of 22 October 2026. It is the SOBHA Townpark call: Sarvam as the caller, Sarvam speech-to-text, Sarvam Bulbul v3 speaker `ishita`, “sq. ft.” spoken as “square feet,” speech that starts on the first clause, and a fixed line for an unmatched positive, negative, neutral, or ambiguous reply before the model is called. Neerja speaks only when Bulbul returns no audio. Do not modify `Version9/`, `Version8/`, `Version7/`, `Version6/`, `Version5/`, `Version4/`, or `Version3/`. Further development belongs in `Version10/`. Versions through Version 9 stay Townpark. All Sobha projects belong in Version 10 and above.
+
+The notes below record how Version 9 was built. They are historical.
+
+Version at the time of those notes: V8 frozen / V9 development
+
+`Version9/` was the development copy. `Version8/`, `Version7/`, `Version6/`, `Version5/`, `Version4/`, and `Version3/` stay frozen.
 
 Copied from `Version8/` on 21 October 2026, and only what the localhost call needs:
 
