@@ -131,6 +131,10 @@ conversation_memory = {
     "pending_project_ids": [],
     "active_project_ids": [],
     "narrow_asked": False,
+    "pair_briefed": False,
+    "pair_overview_spoken": False,
+    "location_detail_spoken": False,
+    "last_location_line": "",
 }
 
 # =====================================================
@@ -366,6 +370,12 @@ def correct_stt(user_text, stage=None):
             print(f"STT CORRECTION: '{original}' -> '{replacement}'")
             return replacement
 
+    # "East Bengaluru" answers the part question. It is not a request to hear about location.
+    if catalog.part_of_city(original):
+        return original
+    if re.search(r"part of bengaluru|which part of", last_question):
+        return original
+
     # After the qualify prompt, a short topic label is usually a menu pick.
     # Do not rewrite an actual question or concern into that label.
     if stage in ("qualify", "answer_faq") and len(normalized.split()) <= 4:
@@ -507,10 +517,6 @@ def kb_context_for_intent(intent):
     if len(focus) > 1 or focus[0]["id"] != "sobha-townpark":
         lines = ["Do not mix prices or sizes across projects."]
         lines.extend(catalog.card(project) for project in focus)
-        if intent == "floorplan" and focus[0]["id"] == "sobha-townpark":
-            stated = conversation_memory.get("customer_configuration")
-            if stated in UNIT_SIZES:
-                lines.insert(0, f"Use only these sizes. {UNIT_SIZES[stated]}")
         return "\n".join(lines)
     lines = [
         f"Project: {PROJECT_KB['project_name']}",
@@ -550,6 +556,8 @@ def answer_from_kb(intent):
     """Direct spoken answer from project knowledge base (no LLM)."""
     focus = _focused_projects()
     if len(focus) > 1 or focus[0]["id"] != "sobha-townpark":
+        if intent == "location":
+            return catalog.location_line(focus, name_projects=True)
         sentences = []
         for project in focus:
             if intent == "pricing":
@@ -559,11 +567,8 @@ def answer_from_kb(intent):
                     sentences.append(
                         f"The price for {project['spoken']} will be discussed by our sales advisor."
                     )
-            elif intent == "location":
-                sentences.append(f"{project['spoken']} is located {project['location']}.")
             elif intent == "floorplan":
-                detail = project["configuration"] or project["size_band"]
-                sentences.append(f"{project['spoken']} offers {detail}.")
+                sentences.append(_home_line(project, include_size=True))
             elif intent == "amenities":
                 sentences.append(
                     f"I don't have that detail for {project['spoken']} right now; "
@@ -634,6 +639,13 @@ def detect_intent(user_query):
 
 def build_retrieval_query(intent, user_query):
     """Combine user speech with intent hints for better brochure matching."""
+    focus = _focused_projects()
+    if conversation_memory.get("active_project_ids") and (
+        len(focus) > 1 or focus[0]["id"] != "sobha-townpark"
+    ):
+        names = " ".join(project["spoken"] for project in focus)
+        places = " ".join(project["place"] or project["location"] for project in focus)
+        return f"{user_query} {names} {places}".strip()
     expansion = INTENT_QUERY_EXPANSION.get(intent, INTENT_QUERY_EXPANSION["general"])
     return f"{user_query} {expansion}".strip()
 
@@ -908,8 +920,10 @@ def generate_response(user_query, intent, brochure_context, top_score):
         known.append(f"Locality already stated: {conversation_memory['customer_locality']}")
     if conversation_memory.get("customer_configuration"):
         known.append(f"Configuration already stated: {conversation_memory['customer_configuration']}")
-    elif "configuration" in (conversation_memory.get("open_topics") or []):
-        known.append("Configuration was left open. Do not ask which BHK again.")
+    elif "configuration" in (conversation_memory.get("open_topics") or []) or conversation_memory.get(
+        "configuration_skipped"
+    ):
+        known.append("Configuration was left open. Do not ask which bedroom count again.")
     if conversation_memory.get("size_decided") and conversation_memory.get("customer_variant"):
         config = conversation_memory.get("customer_configuration") or "home"
         variant = conversation_memory["customer_variant"]
@@ -956,8 +970,8 @@ def generate_response(user_query, intent, brochure_context, top_score):
     elif last_question:
         continuation = (
             f"You just asked: {last_question}\n"
-            "Do not ask that question again, unless the customer asked you to wait. "
-            "If they asked you to wait, say you will wait and repeat only that question."
+            "Do not ask that question again. "
+            "If the customer asked you to wait, say you will wait. Do not repeat the question."
         )
     else:
         continuation = "You have not asked a question yet."
@@ -976,7 +990,7 @@ def generate_response(user_query, intent, brochure_context, top_score):
         "A simple factual question can be only the answer. "
         "An objection needs acknowledgement, the grounded answer, and at most one question. "
         "If the customer needs time, acknowledge that and offer to share the available details. Do not push a site visit. "
-        "If the customer asks you to wait, say you will wait and repeat only the question you just asked. "
+        "If the customer asks you to wait, say you will wait. Do not repeat the question. "
         "Do not say goodbye and do not switch to the BHK menu. "
         "If they ask about an offer and the supplied information has no offer, say no confirmed offer is available. "
         "If a requested fact is not in the supplied information, say it is not confirmed. Do not guess. "
@@ -1123,7 +1137,8 @@ def approves_the_price(text):
     cleaned = re.sub(r"[^\w\s]", "", (text or "").lower())
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return re.fullmatch(
-        r"(?:(?:okay|ok|yeah|yes)\s+)?(?:thats|that is|sounds|this is)\s+(?:good|great|fine|nice)",
+        r"(?:(?:okay|ok|yeah|yes)\s+)?(?:and\s+)?"
+        r"(?:thats|that is|sounds|this is)\s+(?:good|great|fine|nice)",
         cleaned,
     ) is not None
 
@@ -1202,8 +1217,19 @@ def asks_about_the_visit(text):
     return True
 
 
+def is_a_hold(text):
+    """The customer is pausing. This is not an answer to the last question."""
+    return re.search(
+        r"\b(one minute|just a minute|hold on)\b",
+        text or "",
+        re.I,
+    ) is not None
+
+
 def is_new_faq_question(text):
     """Detect that the customer is asking another project question."""
+    if is_a_hold(text) or defers_the_visit(text) or needs_time(text):
+        return False
     text_lower = text.lower()
     question_clues = [
         "tell me", "i would like", "what about", "how about", "know about",
@@ -1256,10 +1282,18 @@ def refuses_details(text):
 
 def defers_the_visit(text):
     """The customer is putting the visit off, not asking for another topic."""
-    return re.search(
+    low = (text or "").lower()
+    if re.search(
         r"\b(let you know later|let me know later|i'?ll let you know|i will let you know|"
-        r"(?:come|get) back(?: to you)? later)\b",
-        (text or "").lower(),
+        r"(?:come|get) back(?: to you)? later|"
+        r"decide(?:\s+(?:it|this|that))?\s+later|"
+        r"plan(?:\s+\w+){0,6}\s+later)\b",
+        low,
+    ):
+        return True
+    return "later" in low and re.search(
+        r"\blook into (?:it|the project|this)\b",
+        low,
     ) is not None
 
 
@@ -1700,6 +1734,7 @@ HOME_QUESTION = "Would you like to hear about the kind of home?"
 PRICE_QUESTION = "Would you like to know the starting price?"
 AMENITIES_QUESTION = "Would you like to hear about the amenities?"
 OPEN_PROJECT_QUESTION = "Would you like to know anything else about the project?"
+OPEN_PROJECTS_QUESTION = "Would you like to know anything else about the projects?"
 CALLBACK_QUESTION = (
     "That's completely fine. We do have other projects that can suit that. "
     "Can I arrange a call back from our sales representative?"
@@ -1714,9 +1749,21 @@ def blocked_topics():
     return blocked
 
 
+def _open_project_question():
+    """One project stays singular. Two projects use the plural."""
+    if len(conversation_memory.get("active_project_ids") or []) > 1:
+        return OPEN_PROJECTS_QUESTION
+    return OPEN_PROJECT_QUESTION
+
+
 def next_question():
     """One next question that is not the question just asked and not a parked topic."""
     last = conversation_memory.get("last_agent_question") or ""
+    if conversation_memory.get("active_project_ids"):
+        question = _open_project_question()
+        if last != question:
+            return question
+        return FALLBACK_QUESTION
     blocked = blocked_topics()
     choices = []
     if not conversation_memory.get("customer_purpose") and "purpose" not in blocked:
@@ -1835,7 +1882,7 @@ def open_project_or_visit(lead):
     if conversation_memory.get("open_project_asked"):
         return OFFER_THE_VISIT
     conversation_memory["open_project_asked"] = True
-    return f"{lead} {OPEN_PROJECT_QUESTION}".strip()
+    return f"{lead} {_open_project_question()}".strip()
 
 
 def budget_in_crore(text):
@@ -1909,13 +1956,14 @@ def known_transition(user_text):
     if asks_about_payment(user_text):
         conversation_memory["stage"] = "answer_faq"
         return payment_and_open()
-    if (
+    if approves_the_price(user_text) and (
         conversation_memory.get("price_stated")
-        and not conversation_memory.get("open_project_asked")
-        and approves_the_price(user_text)
+        or conversation_memory.get("active_project_ids")
     ):
-        conversation_memory["stage"] = "answer_faq"
-        return open_project_or_visit("Understood.")
+        if not last_question_is_open_project():
+            conversation_memory["stage"] = "answer_faq"
+            conversation_memory["open_project_asked"] = True
+            return f"Understood. {_open_project_question()}"
     return reply_for_open_project(user_text)
 
 
@@ -1957,7 +2005,7 @@ def asks_for_a_floor_plan(text):
     """A layout question. A bare 'what does it mean' counts only after a layout line."""
     low = (text or "").lower()
     if re.search(
-        r"\b(layout|floor\s*plan|floorplan|internal (?:zoning|joining)|zoning)\b",
+        r"\b(layout|floor\s*plans?|floorplan|internal (?:zoning|joining)|zoning)\b",
         low,
     ):
         return True
@@ -1969,7 +2017,7 @@ def asks_for_a_floor_plan(text):
             conversation_memory.get("last_spoken_reply") or "",
         ) if part
     ).lower()
-    return re.search(r"\b(layout|floor\s*plan|floorplan|zoning|joining)\b", last) is not None
+    return re.search(r"\b(layout|floor\s*plans?|floorplan|zoning|joining)\b", last) is not None
 
 
 def drop_invented_floor_plan(answer):
@@ -1977,7 +2025,7 @@ def drop_invented_floor_plan(answer):
     kept = []
     for sentence in split_sentences(answer or ""):
         if "?" in sentence and re.search(
-            r"\b(layout|floor\s*plan|floorplan|zoning|joining)\b",
+            r"\b(layout|floor\s*plans?|floorplan|zoning|joining)\b",
             sentence,
             re.I,
         ):
@@ -1999,9 +2047,16 @@ def reply_for_floor_plan(user_text):
     numbers = re.findall(r"\d{3,4}", size or "")
     if size and (not numbers or not all(number in last for number in numbers)):
         parts.append(size.rstrip("."))
-    parts.append("I don't have a floor plan beyond that size.")
-    conversation_memory["stage"] = "answer_faq"
-    return follow_on(" ".join(parts))
+    parts.append("Our sales advisor can share the floor plans.")
+    will_decide = defers_the_visit(user_text) or re.search(
+        r"\bi will decide\b", user_text or "", re.I
+    )
+    if conversation_memory.get("visit_offered") and will_decide:
+        conversation_memory["stage"] = "closed"
+        return f"{' '.join(parts)} {ADVISOR_CLOSE}"
+    if not conversation_memory.get("visit_offered"):
+        conversation_memory["stage"] = "answer_faq"
+    return " ".join(parts)
 
 
 def move_on_line():
@@ -2042,6 +2097,20 @@ def topic_of_text(text):
 
 def fact_for_offered_topic(topic):
     """The stored project fact for a topic the customer agreed to hear."""
+    ids = conversation_memory.get("active_project_ids") or []
+    focus = [catalog.BY_ID[item] for item in ids if item in catalog.BY_ID]
+    if len(focus) > 1 or (focus and focus[0]["id"] != "sobha-townpark"):
+        if topic == "home":
+            return " ".join(f"{project['spoken']} is {project['theme']}." for project in focus)
+        if topic == "price":
+            return price_statement()
+        if topic == "amenities":
+            return " ".join(
+                f"Our sales team can share the latest amenities for {project['spoken']}."
+                for project in focus
+            )
+        if topic == "location":
+            return catalog.location_line(focus, name_projects=True)
     if topic == "home":
         return "SOBHA Townpark is a New York-themed luxury community."
     if topic == "price":
@@ -2265,7 +2334,9 @@ def sentence_asks_to_pick_configuration(sentence):
     return re.search(
         r"\b(configurations?|which bhk|specific configuration|specific sizes|"
         r"available configuration|available sizes|"
-        r"one, two, three|smaller or larger|larger or smaller)\b",
+        r"one, two, three|smaller or larger|larger or smaller|"
+        r"bedroom count|particular bedroom|specific bedroom|which bedroom|"
+        r"bedroom or|prefer the \d|or the \d bedroom)\b",
         sentence,
         re.I,
     ) is not None
@@ -2393,7 +2464,8 @@ def leave_closed_configuration(user_query, answer):
     """Once configuration is left open, do not ask the BHK menu again unless they ask."""
     if conversation_memory.get("customer_configuration"):
         return answer
-    if "configuration" not in (conversation_memory.get("open_topics") or []):
+    left_open = "configuration" in (conversation_memory.get("open_topics") or [])
+    if not left_open and not conversation_memory.get("configuration_skipped"):
         return answer
     asked = customer_asks_about_configuration(user_query)
     kept = []
@@ -2574,10 +2646,65 @@ def _recites_a_size(sentence):
     )
 
 
+def _townpark_sizes_apply():
+    """Townpark ranges stay on Townpark. Another project uses its own card."""
+    ids = conversation_memory.get("active_project_ids") or []
+    return not ids or ids == ["sobha-townpark"]
+
+
+def _plain_sheet(text):
+    cleaned = (text or "").replace("&", "and")
+    cleaned = cleaned.replace("–", " to ").replace("—", " to ")
+    cleaned = re.sub(r"\bSq\.?\s*Ft\.?", "sq. ft.", cleaned, flags=re.I)
+    return re.sub(r"\s+", " ", cleaned).strip(" ,")
+
+
+def _home_line(project, include_size=False):
+    """Configuration, and the size band when asked. Townpark sizes stay labeled Townpark."""
+    if project["id"] == "sobha-townpark":
+        stated = conversation_memory.get("customer_configuration")
+        size = UNIT_SIZES.get(stated or "")
+        if include_size and size:
+            return f"SOBHA Townpark. {size}"
+        detail = _plain_sheet(project["configuration"] or project["size_band"])
+        return f"SOBHA Townpark offers {detail}."
+    config = _plain_sheet(project["configuration"])
+    band = _plain_sheet(project["size_band"])
+    if include_size and config and band:
+        return f"{project['spoken']} offers {config}, {band}."
+    return f"{project['spoken']} offers {config or band}."
+
+
+def _foreign_size_reply(answer):
+    """A Townpark size spoken for another project is replaced with that project's card."""
+    kept = []
+    replaced = False
+    for sentence in split_sentences(answer):
+        foreign = _recites_a_size(sentence) or re.search(r"\b(luxe|grande)\b", sentence, re.I)
+        choosing = re.search(
+            r"\b(which size|size within|bedroom count|particular bedroom|specific bedroom)\b",
+            sentence,
+            re.I,
+        )
+        if foreign or choosing:
+            replaced = True
+            continue
+        kept.append(sentence)
+    if not replaced:
+        return answer
+    body = " ".join(_home_line(project, include_size=True) for project in _focused_projects())
+    tail = " ".join(kept).strip()
+    if tail:
+        return f"{body} {tail}".strip()
+    return body
+
+
 def use_unit_sizes(user_query, answer):
     """A size recital uses the stored ranges. Swapped Luxe and Grande labels are replaced."""
     if not answer:
         return answer
+    if not _townpark_sizes_apply():
+        return _foreign_size_reply(answer)
     stored = conversation_memory.get("customer_configuration")
     asked = customer_asks_about_configuration(user_query)
     rebuilt = []
@@ -2715,6 +2842,8 @@ def is_location_concern(text):
 
 def missing_requirement_question(text):
     """One qualification question, or None when the customer's point should be answered."""
+    if conversation_memory.get("active_project_ids"):
+        return None
     if (
         is_direct_project_question(text)
         or is_purpose_statement(text)
@@ -2737,6 +2866,13 @@ def missing_requirement_question(text):
 def qualification_twiml(question):
     """Ask one qualification question and keep listening."""
     return f"<Response>{gather_block(question)}</Response>"
+
+
+def wait_response(user_text):
+    """A pause keeps the call open and does not repeat the last question."""
+    if not is_a_hold(user_text):
+        return None
+    return Response(content=qualification_twiml("I will wait."), media_type="application/xml")
 
 
 def time_to_decide_twiml():
@@ -2811,10 +2947,20 @@ def reset_memory():
     conversation_memory["pending_project_ids"] = []
     conversation_memory["active_project_ids"] = []
     conversation_memory["narrow_asked"] = False
+    conversation_memory["pair_briefed"] = False
+    conversation_memory["pair_overview_spoken"] = False
+    conversation_memory["location_detail_spoken"] = False
+    conversation_memory["last_location_line"] = ""
 
 
 def grounded_reply(user_text):
     """One spoken answer from the customer's words. Does not change the stage."""
+    card = reply_from_active_cards(user_text)
+    if card:
+        return card
+    repeated = unclear_prompt(user_text)
+    if repeated:
+        return repeated
     note_customer_requirements(user_text)
     intent = turn_intent(user_text)
     conversation_memory["last_intent"] = intent
@@ -3037,18 +3183,29 @@ def _remember_projects(projects):
     _load_focus_brochures(projects)
 
 
+def _skips_catalog_question(user_text):
+    return (
+        catalog.undecided(user_text)
+        or has_not_finalized(user_text)
+        or leaves_fact_open(user_text)
+    )
+
+
 def _absorb_catalog(user_text):
     last = (conversation_memory.get("last_agent_question") or "").lower()
-    if catalog.undecided(user_text):
+    if _skips_catalog_question(user_text):
         if "part of bengaluru" in last or "which part" in last:
             conversation_memory["part_skipped"] = True
-        elif "configuration" in last:
+            return
+        if "configuration" in last:
             conversation_memory["configuration_skipped"] = True
-        elif "live in" in last or "investment" in last:
+            return
+        if "live in" in last or "investment" in last:
             conversation_memory["purpose_skipped"] = True
-        elif "closer to" in last:
+            return
+        if "closer to" in last:
             conversation_memory["narrow_asked"] = True
-        return
+            return
     part = catalog.part_of_city(user_text)
     if part:
         conversation_memory["customer_part"] = part
@@ -3120,6 +3277,185 @@ def _next_catalog_question():
     return None
 
 
+def _part_answer_missing():
+    """The part question was asked, and this reply did not answer it or skip it."""
+    if conversation_memory.get("customer_part") or conversation_memory.get("part_skipped"):
+        return False
+    if conversation_memory.get("customer_place") or conversation_memory.get("active_project_ids"):
+        return False
+    if not conversation_memory.get("part_asked"):
+        return False
+    last = (conversation_memory.get("last_agent_question") or "").lower()
+    return "part of bengaluru" in last or "which part" in last
+
+
+def _pair_overview(projects):
+    """Theme for each project, the shared place once, then one question."""
+    chosen = list(projects)[:2]
+    _remember_projects(chosen)
+    conversation_memory["price_stated"] = True
+    remember_covered("price")
+    conversation_memory["pair_briefed"] = True
+    conversation_memory["pair_overview_spoken"] = True
+    remember_covered("location")
+    shared = (
+        len(chosen) == 2
+        and chosen[0].get("place")
+        and chosen[0]["place"] == chosen[1].get("place")
+    )
+    parts = [_theme_sentence(project, include_place=not shared) for project in chosen]
+    if shared:
+        parts.append(catalog.location_line(chosen))
+    if not _configuration_already_chosen():
+        remember_covered("home")
+        parts.extend(_home_line(project, include_size=True) for project in chosen)
+    conversation_memory["open_project_asked"] = True
+    parts.append(_open_project_question())
+    return " ".join(part for part in parts if part)
+
+
+def _pair_brief(projects):
+    """The both-project introduction. A later continue uses the same brief."""
+    return _pair_overview(projects)
+
+
+def _unsure_before_the_brief(user_text):
+    """They do not know what to ask, and the themes have not been spoken."""
+    if len(conversation_memory.get("active_project_ids") or []) < 2:
+        return False
+    if conversation_memory.get("pair_overview_spoken"):
+        return False
+    return is_unsure(user_text)
+
+
+def _repeat_unanswered_purpose(user_text):
+    """A short unrecognized reply does not skip the purpose question."""
+    last = (conversation_memory.get("last_agent_question") or "").lower()
+    if "live in" not in last and "investment" not in last:
+        return None
+    if is_purpose_statement(user_text) or _skips_catalog_question(user_text):
+        return None
+    if (
+        catalog.place_named(user_text)
+        or catalog.project_named_in(user_text)
+        or catalog.part_of_city(user_text)
+        or catalog.budget_ceiling(user_text)[0] is not None
+    ):
+        return None
+    if not unclear_prompt(user_text):
+        return None
+    return f"Sorry, I didn't catch that. {catalog.PURPOSE_QUESTION}"
+
+
+def _wants_to_continue(text):
+    return re.search(r"\b(continue|go ahead|carry on)\b", text or "", re.I) is not None
+
+
+def _continue_after_pair(user_text):
+    """A continue after both projects are chosen stays on their cards."""
+    if len(conversation_memory.get("active_project_ids") or []) < 2:
+        return None
+    if not _wants_to_continue(user_text):
+        return None
+    focus = _focused_projects()
+    if not conversation_memory.get("pair_briefed"):
+        return _pair_brief(focus)
+    if "home" not in (conversation_memory.get("covered_topics") or []):
+        remember_covered("home")
+        return f"{answer_from_kb('floorplan')} {_open_project_question()}"
+    return _open_project_question()
+
+
+def _asks_for_a_price(text):
+    return re.search(r"\b(price|cost|how much)\b", text or "", re.I) is not None
+
+
+def _price_for_named_home(user_text):
+    """The project starting price. A named bedroom count has no separate stored price."""
+    body = price_statement()
+    beds = catalog.bedrooms_named(user_text)
+    if beds is None:
+        return body
+    shown = str(int(beds)) if beds == int(beds) else str(beds)
+    return f"{body} Our sales advisor can share the price for a {shown} bedroom home."
+
+
+def reply_from_active_cards(user_text):
+    """Location, size, price, and amenities come from the projects in focus."""
+    ids = conversation_memory.get("active_project_ids") or []
+    if not ids:
+        return None
+    focus = _focused_projects()
+    if len(focus) == 1 and focus[0]["id"] == "sobha-townpark":
+        return None
+    if _asks_for_a_price(user_text):
+        return _price_for_named_home(user_text)
+    intent = detect_intent(user_text)
+    if intent not in ("location", "floorplan", "pricing", "amenities"):
+        return None
+    if not is_new_faq_question(user_text) and intent == "general":
+        return None
+    if intent == "pricing":
+        body = price_statement()
+    elif intent == "location":
+        body = _location_reply(user_text)
+    else:
+        body = answer_from_kb(intent)
+        if intent == "floorplan":
+            remember_covered("home")
+        elif intent == "amenities":
+            remember_covered("amenities")
+    if not body:
+        return None
+    if len(focus) > 1 and "?" not in body:
+        return f"{body} What would you like to know about them?"
+    return body
+
+
+def unclear_prompt(user_text):
+    """An unrecognized short reply is repeated, not sent to the model."""
+    text = (user_text or "").strip()
+    if not text:
+        return None
+    if is_positive(text) or is_clear_negative(text) or available_to_talk(text):
+        return None
+    if is_purpose_statement(text) or extract_configuration(text) or is_bare_configuration_word(text):
+        return None
+    if catalog.part_of_city(text) or catalog.place_named(text) or catalog.project_named_in(text):
+        return None
+    if catalog.outside_project_named(text) or catalog.undecided(text) or catalog.wants_a_plot(text):
+        return None
+    if catalog.budget_ceiling(text)[0] is not None:
+        return None
+    if re.search(r"\b(one minute|just a minute|hold on)\b", text, re.I):
+        return None
+    if re.search(r"\b(both|continue|go ahead|carry on)\b", text, re.I):
+        return None
+    if is_new_faq_question(text) or is_direct_project_question(text):
+        return None
+    if wants_site_visit(text) or asks_about_the_visit(text) or needs_time(text):
+        return None
+    if unmatched_reply_kind(text) or asks_to_call_later(text):
+        return None
+    words = re.findall(r"[a-z]+", text.lower())
+    if len(words) > 3:
+        return None
+    return "Sorry, I didn't catch that. Could you please repeat that?"
+
+
+def _apartment_shortlist(matches):
+    """A skipped configuration is not a request for a plot or a row house."""
+    if (
+        conversation_memory.get("configuration_skipped")
+        and not conversation_memory.get("wants_plot")
+        and conversation_memory.get("customer_bedrooms") is None
+    ):
+        apartments = [project for project in matches if project["home_type"] == "apartment"]
+        if apartments:
+            return apartments
+    return matches
+
+
 def _suggest_catalog():
     matches = _current_matches()
     ceiling = conversation_memory.get("price_ceiling")
@@ -3127,6 +3463,9 @@ def _suggest_catalog():
     gave_part = bool(
         conversation_memory.get("customer_part") or conversation_memory.get("customer_place")
     )
+    if not matches and ceiling is not None and conversation_memory.get("customer_place"):
+        conversation_memory["customer_place"] = None
+        matches = _current_matches()
     if not matches and ceiling is not None:
         nearest = catalog.nearest_project(ceiling)
         if not nearest:
@@ -3138,25 +3477,250 @@ def _suggest_catalog():
             f"{nearest['price_spoken']}. Our sales advisor can look further. "
             "Shall I tell you about that?"
         )
+    listed = _apartment_shortlist(matches)
     if (
-        len(matches) > 2
+        len(listed) > 2
         and gave_part
         and not conversation_memory.get("narrow_asked")
         and not conversation_memory.get("customer_place")
     ):
         conversation_memory["narrow_asked"] = True
-        conversation_memory["pending_project_ids"] = [project["id"] for project in matches]
-        return catalog.suggestion(matches)
-    if len(matches) > 2:
-        matches = sorted(
+        conversation_memory["pending_project_ids"] = [project["id"] for project in listed]
+        return catalog.suggestion(listed)
+    closest = len(matches) > 2
+    shown = matches
+    if closest:
+        shown = sorted(
             (project for project in matches if project["price_crore"] is not None),
             key=lambda project: (project["price_crore"], project["spoken"]),
         )[:2]
-    if not matches:
+    if not shown:
         return "ADVISOR"
+    conversation_memory["pending_project_ids"] = [project["id"] for project in shown]
+    conversation_memory["awaiting_suggestion"] = True
+    return catalog.suggestion(matches, ceiling=ceiling, strict=strict, closest=closest)
+
+
+def _asks_to_change_language(text):
+    """A request for another language. The call stays in English."""
+    return re.search(
+        r"\b(hindi|kannada|tamil|telugu|malayalam)\b|\bspeak in\b",
+        text or "",
+        re.I,
+    ) is not None
+
+
+def _heard_the_offer(text):
+    """They are saying the offer was already spoken."""
+    return re.search(
+        r"\b(already told|already said|already asked|you already|repeating)\b",
+        text or "",
+        re.I,
+    ) is not None
+
+
+def _accepts_the_offer(user_text):
+    """A yes to the one project just offered, including 'let me know about that'."""
+    if re.search(r"\bvisit\b", user_text or "", re.I):
+        return False
+    if is_positive(user_text) or re.search(r"\byes\b", user_text or "", re.I):
+        return True
+    low = (user_text or "").lower()
+    if re.search(r"\bthat(?:'s| is) what i asked\b", low):
+        return True
+    return re.search(
+        r"\b(?:let me know|tell me) about (?:that|it|this)\b|\byou can let me know\b",
+        low,
+    ) is not None
+
+
+def _remember_place_line(line):
+    conversation_memory["location_detail_spoken"] = True
+    conversation_memory["last_location_line"] = line
+    remember_covered("location")
+
+
+def _configuration_already_chosen():
+    return conversation_memory.get("customer_bedrooms") is not None or bool(
+        conversation_memory.get("customer_configuration")
+    )
+
+
+def _project_where(project):
+    area = catalog.spoken_area(project)
+    low = area.lower()
+    if low.startswith("near "):
+        return f"near {area[5:]}"
+    if low.startswith("off "):
+        return f"off {area[4:]}"
+    return f"at {area}"
+
+
+def _theme_sentence(project, include_place=True):
+    """The stored theme, with the place when this project stands alone."""
+    theme = (project.get("theme") or "").strip().rstrip(".")
+    where = _project_where(project)
+    if theme:
+        article = "an" if theme[:1].lower() in "aeiou" else "a"
+        if include_place:
+            return f"{project['spoken']} is {article} {theme} project {where}."
+        return f"{project['spoken']} is {article} {theme} project."
+    if include_place:
+        return f"{project['spoken']} is {where}."
+    return project["spoken"]
+
+
+def _opened_project(project):
+    """Theme and place. Configuration is added only when it has not been chosen."""
+    _remember_projects([project])
+    conversation_memory["price_stated"] = True
+    remember_covered("price")
+    _remember_place_line(catalog.place_sentence(project))
+    spoken = _theme_sentence(project, include_place=True)
+    if not _configuration_already_chosen():
+        spoken = f"{spoken} {_home_line(project, include_size=True)}"
+    conversation_memory["open_project_asked"] = True
+    return f"{spoken} {_open_project_question()}"
+
+
+def _asks_for_a_finer_place(user_text):
+    return re.search(
+        r"\b(where in|exact location|where exactly|exactly where)\b",
+        user_text or "",
+        re.I,
+    ) is not None
+
+
+def _location_reply(user_text):
+    """Speak the stored place once. A finer question after that goes to the advisor."""
+    focus = _focused_projects()
+    line = catalog.location_line(focus, name_projects=True)
+    previous = (conversation_memory.get("last_location_line") or "").lower()
+    area = catalog.spoken_area(focus[0]).lower() if len(focus) == 1 else ""
+    finer = (
+        conversation_memory.get("location_detail_spoken")
+        and _asks_for_a_finer_place(user_text)
+        and previous
+    )
+    if finer and len(focus) == 1 and area and area in previous:
+        return "Our sales advisor can share the exact location."
+    if finer and len(focus) >= 2 and all(
+        catalog.spoken_area(project).lower() in previous or project["place"].lower() in previous
+        for project in focus[:2]
+    ):
+        return "Our sales advisor can share the exact location."
+    _remember_place_line(line)
+    return line
+
+
+def _wants_project_details(user_text):
+    if _wants_to_continue(user_text):
+        return True
+    return re.search(
+        r"\b(other details|more details|more about|tell me more|any other|about the project)\b",
+        user_text or "",
+        re.I,
+    ) is not None
+
+
+def _more_about_locked(user_text):
+    """Continue or other details stay on the locked card, without a new bedroom question."""
+    if not conversation_memory.get("active_project_ids"):
+        return None
+    if not _wants_project_details(user_text):
+        return None
+    if detect_intent(user_text) in ("location", "pricing", "amenities"):
+        return None
+    focus = _focused_projects()
+    lines = [_home_line(project, include_size=True) for project in focus]
+    remember_covered("home")
+    if len(focus) == 1:
+        conversation_memory["open_project_asked"] = True
+        return f"{' '.join(lines)} {OPEN_PROJECT_QUESTION}"
+    return f"{' '.join(lines)} What would you like to know about them?"
+
+
+def _offered_bhk_options(user_text):
+    """A yes to the 3 BHK options just offered speaks the stored Townpark ranges."""
+    last = (conversation_memory.get("last_agent_question") or "").lower()
+    if "bhk" not in last or not re.search(r"\b(option|options|size|sizes)\b", last):
+        return None
+    low = (user_text or "").lower()
+    agreed = re.search(r"\bthat(?:'s| is) what i asked\b", low) or _accepts_the_offer(user_text)
+    if not agreed:
+        return None
+    focus = _focused_projects()
+    if len(focus) == 1 and focus[0]["id"] == "sobha-townpark":
+        config = conversation_memory.get("customer_configuration") or "3 BHK"
+        size = UNIT_SIZES.get(config)
+        if size:
+            remember_covered("home")
+            return f"{size} What would you like to know about it?"
+    return _more_about_locked("other details") or _home_line(focus[0], include_size=True)
+
+
+def _switch_to_named_place(user_text):
+    """A later place replaces the locked project when another stored project is there."""
+    place = catalog.place_named(user_text)
+    if not place:
+        return None
+    focus = [
+        catalog.BY_ID[item]
+        for item in (conversation_memory.get("active_project_ids") or [])
+        if item in catalog.BY_ID
+    ]
+    if not focus or all(project.get("place") == place for project in focus):
+        return None
+    matches = catalog.matching_projects(
+        part=conversation_memory.get("customer_part"),
+        bedrooms=conversation_memory.get("customer_bedrooms"),
+        place=place,
+        plots_only=bool(conversation_memory.get("wants_plot")),
+    )
+    if not matches:
+        return None
+    conversation_memory["customer_place"] = place
+    conversation_memory["active_project_ids"] = []
+    conversation_memory["catalog_done"] = False
+    conversation_memory["price_stated"] = False
+    conversation_memory["location_detail_spoken"] = False
+    conversation_memory["last_location_line"] = ""
     conversation_memory["pending_project_ids"] = [project["id"] for project in matches]
     conversation_memory["awaiting_suggestion"] = True
-    return catalog.suggestion(matches, ceiling=ceiling, strict=strict)
+    conversation_memory["stage"] = "qualify"
+    return catalog.suggestion(matches)
+
+
+def _asks_where(text):
+    return detect_intent(text) == "location" or re.search(
+        r"\b(where|location|located)\b",
+        text or "",
+        re.I,
+    ) is not None
+
+
+def _offered_pair(user_text, pending, named):
+    """Both offered projects, when they say both, the projects, or name both."""
+    if len(pending) < 2:
+        return None
+    pending_ids = {project["id"] for project in pending}
+    named_here = [project for project in named if project["id"] in pending_ids]
+    if len(named_here) >= 2:
+        return named_here[:2]
+    if re.search(r"\b(both|projects|them)\b", user_text or "", re.I):
+        return pending[:2]
+    return None
+
+
+def _places_for_offer(chosen):
+    """Lock the offered projects and speak one place each."""
+    _remember_projects(chosen)
+    conversation_memory["price_stated"] = True
+    remember_covered("price")
+    line = _location_reply("where are they")
+    if len(chosen) > 1:
+        return f"{line} What would you like to know about them?"
+    return f"{line} What would you like to know about it?"
 
 
 def _answer_suggestion(user_text):
@@ -3170,15 +3734,33 @@ def _answer_suggestion(user_text):
         for item in (conversation_memory.get("pending_project_ids") or [])
         if item in catalog.BY_ID
     ]
-    if re.search(r"\bboth\b", user_text or "", re.I) and len(pending) >= 2:
-        _remember_projects(pending[:2])
-        return f"Alright, I'll cover {pending[0]['spoken']} and {pending[1]['spoken']}."
+    if _asks_where(user_text) and pending:
+        pair = _offered_pair(user_text, pending, named)
+        if pair:
+            return _places_for_offer(pair)
+        if len(named) == 1:
+            return _places_for_offer(named)
+        if len(pending) == 1:
+            return _places_for_offer(pending)
+    if re.search(r"\bboth\b", user_text or "", re.I) and len(pending) == 2:
+        return _pair_brief(pending)
     if len(named) == 1:
-        _remember_projects(named)
-        return f"Alright, I'll stay with {named[0]['spoken']}."
-    if (is_positive(user_text) or re.search(r"\byes\b", user_text or "", re.I)) and len(pending) == 1:
-        _remember_projects(pending)
-        return f"Alright, I'll stay with {pending[0]['spoken']}."
+        return _opened_project(named[0])
+    if _accepts_the_offer(user_text) and len(pending) == 1:
+        if re.search(r"\b(other details|more details|already told|already said)\b", user_text or "", re.I):
+            project = pending[0]
+            _remember_projects([project])
+            conversation_memory["price_stated"] = True
+            remember_covered("price")
+            return f"{_home_line(project, include_size=True)} What would you like to know about it?"
+        return _opened_project(pending[0])
+    if len(pending) == 1 and (
+        _heard_the_offer(user_text) or _asks_to_change_language(user_text)
+    ):
+        opened = _opened_project(pending[0])
+        if _asks_to_change_language(user_text):
+            return f"I can continue in English. {opened}"
+        return opened
     place = catalog.place_named(user_text)
     if place:
         conversation_memory["customer_place"] = place
@@ -3190,7 +3772,15 @@ def _answer_suggestion(user_text):
         return _suggest_catalog()
     _absorb_catalog(user_text)
     conversation_memory["awaiting_suggestion"] = False
-    return _suggest_catalog()
+    nxt = _suggest_catalog()
+    if (
+        len(pending) == 1
+        and isinstance(nxt, str)
+        and "interested to know about the project" in nxt.lower()
+        and pending[0]["spoken"].lower() in nxt.lower()
+    ):
+        return _opened_project(pending[0])
+    return nxt
 
 
 def catalog_reply(user_text):
@@ -3199,9 +3789,30 @@ def catalog_reply(user_text):
         return None
     if re.search(r"\b(one minute|just a minute|hold on)\b", user_text or "", re.I):
         return None
+    if (
+        not conversation_memory.get("awaiting_suggestion")
+        and not conversation_memory.get("catalog_done")
+    ):
+        repeated = _repeat_unanswered_purpose(user_text)
+        if repeated:
+            return repeated
     if conversation_memory.get("awaiting_suggestion"):
         return _answer_suggestion(user_text)
     if conversation_memory.get("catalog_done"):
+        if _unsure_before_the_brief(user_text):
+            return _pair_overview(_focused_projects())
+        switched = _switch_to_named_place(user_text)
+        if switched:
+            return switched
+        offered = _offered_bhk_options(user_text)
+        if offered:
+            return offered
+        continued = _continue_after_pair(user_text)
+        if continued:
+            return continued
+        details = _more_about_locked(user_text)
+        if details:
+            return details
         return None
     if wants_site_visit(user_text) and not conversation_memory.get("active_project_ids"):
         pending = [
@@ -3229,6 +3840,8 @@ def catalog_reply(user_text):
         if not conversation_memory.get("price_stated"):
             return f"{line} {price_statement()}"
         return line
+    if _part_answer_missing():
+        return catalog.AREA_QUESTION
     if conversation_memory.get("active_project_ids") and conversation_memory.get("purpose_prompted"):
         conversation_memory["catalog_done"] = True
         return None
@@ -3347,6 +3960,8 @@ def response_for(reply):
     """Speak a known line, or offer the visit when that line would repeat the fallback."""
     if reply is OFFER_THE_VISIT:
         return offer_the_visit_once()
+    if reply and conversation_memory.get("stage") == "closed":
+        return Response(content=polite_exit_twiml(reply), media_type="application/xml")
     if reply:
         return Response(content=qualification_twiml(reply), media_type="application/xml")
     return None
@@ -3354,6 +3969,8 @@ def response_for(reply):
 
 def offer_the_visit_once():
     """A no to one topic can still hear the visit question one time."""
+    if conversation_memory.get("visit_offered"):
+        return advisor_followup_twiml()
     conversation_memory["visit_offered"] = True
     conversation_memory["stage"] = "propose_slot"
     return Response(content=propose_slot_twiml(), media_type="application/xml")
@@ -3486,6 +4103,9 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
         )
 
     if stage == "qualify":
+        waiting = wait_response(user_text)
+        if waiting:
+            return waiting
         stopped = polite_stop(user_text)
         if stopped:
             return stopped
@@ -3537,6 +4157,9 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
         return Response(content=twiml, media_type="application/xml")
 
     if stage == "answer_faq":
+        waiting = wait_response(user_text)
+        if waiting:
+            return waiting
         stopped = polite_stop(user_text)
         if stopped:
             return stopped
@@ -3634,6 +4257,9 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
         return Response(content=twiml, media_type="application/xml")
 
     if stage == "propose_slot":
+        waiting = wait_response(user_text)
+        if waiting:
+            return waiting
         stopped = polite_stop(user_text)
         if stopped:
             return stopped
@@ -3668,6 +4294,9 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
         return answer_in_place(user_text)
 
     if stage in ("visit_day", "visit_pick_slot"):
+        waiting = wait_response(user_text)
+        if waiting:
+            return waiting
         stopped = polite_stop(user_text)
         if stopped:
             return stopped

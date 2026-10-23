@@ -49,6 +49,10 @@ def _focus(question: str) -> str:
 
 def _question_kind(question: str) -> str:
     text = _focus(question).lower()
+    if re.search(r"part of bengaluru|north, east, or south", text):
+        return "part"
+    if re.search(r"which one shall i|cover both|closer to", text):
+        return "choice"
     if re.search(r"which configuration|one, two, three|bhk homes", text):
         return "configuration"
     if re.search(r"\b(luxe|grande|size|sizes|sq|ranges?)\b", text):
@@ -65,7 +69,10 @@ def _question_kind(question: str) -> str:
 def _leaves_open(text: str) -> bool:
     """The customer left the last topic open. That is an answer."""
     return re.search(
-        r"\b(haven'?t decided|not decided|not sure|decide(?:\s+this)?\s+later|"
+        r"\b(haven'?t decided|not decided|haven'?t finalized|not finalized|"
+        r"not sure|decide(?:\s+(?:it|this|that))?\s+later|"
+        r"let you know later|let me know later|i will let you know|i'?ll let you know|"
+        r"plan(?:\s+\w+){0,6}\s+later|"
         r"not interested in (?:that|it|those|them)|"
         r"already told|already said|already asked|already answered|"
         r"you told|you mentioned|you asked|heard that|didn'?t answer|repeating)\b",
@@ -89,6 +96,10 @@ def _customer_kind(text: str) -> str:
         lowered,
     ):
         return "size"
+    if re.search(r"\bboth\b", lowered):
+        return "choice"
+    if re.search(r"\b(north|east|south)\b", lowered):
+        return "part"
     if re.search(r"\b([1-4]|one|two|three|four)\s*-?\s*bhk\b", lowered):
         return "bhk"
     if re.search(r"\b(luxe|grande|\d{3,4}|square|sq)\b", lowered):
@@ -102,6 +113,9 @@ _FIT = {
     ("configuration", "bhk"),
     ("size", "size"),
     ("purpose", "purpose"),
+    ("part", "part"),
+    ("choice", "choice"),
+    ("choice", "yes"),
     ("open", "yes"),
     ("open", "no"),
     ("open", "bhk"),
@@ -181,6 +195,8 @@ def repeated_questions(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if not key:
                 continue
             if key in seen:
+                if re.search(r"\b(didn'?t catch|please repeat)\b", reply, re.I):
+                    continue
                 add(index, question.strip() + "?", seen[key])
             else:
                 seen[key] = index
@@ -199,6 +215,28 @@ def repeated_questions(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return repeats
 
 
+def _names_a_sellable_project(text: str) -> bool:
+    """A project name answers the part question. North, East, or South are not required."""
+    from local_call import projects as catalog
+
+    return bool(catalog.project_named_in(text))
+
+
+def _names_offered_place(question: str, customer: str) -> bool:
+    """Panathur answers 'closer to Whitefield, Panathur, or Sarjapur?'"""
+    low = (question or "").lower()
+    if "closer to" not in low:
+        return False
+    tail = low.split("closer to", 1)[1]
+    spoken = (customer or "").lower()
+    for name in re.findall(r"[a-z][a-z'-]+", tail):
+        if name in {"or", "are", "you", "looking"}:
+            continue
+        if re.search(rf"\b{re.escape(name)}\b", spoken):
+            return True
+    return False
+
+
 def last_answer_fit(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
     results = []
     previous_reply = ""
@@ -213,10 +251,46 @@ def last_answer_fit(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
         else:
             kind = _question_kind(asked[-1])
             answer = _customer_kind(customer)
+            fit = answer in ("open_answer", "no") or (kind, answer) in _FIT
+            if not fit and kind == "choice" and _names_offered_place(asked[-1], customer):
+                fit = True
+            if not fit and kind == "part" and _names_a_sellable_project(customer):
+                fit = True
+            if not fit and kind == "yes_no" and re.search(
+                r"\b(?:tell me|let me know|you can tell me) about (?:that|it|this)\b",
+                customer,
+                re.I,
+            ):
+                fit = True
+            if not fit and re.search(
+                r"anything else about the project|what would you like to know",
+                asked[-1],
+                re.I,
+            ) and re.search(
+                r"\b(price|cost|how much|where|location|located|configuration|bhk|bedroom)\b",
+                customer,
+                re.I,
+            ):
+                fit = True
+            if not fit and re.search(
+                r"interested to know about the project",
+                asked[-1],
+                re.I,
+            ) and re.search(r"\b(budget|crore|lakh)\b", customer, re.I):
+                fit = True
+            reply = turn.get("reply") or ""
+            if not fit and re.search(r"\b(didn'?t catch|please repeat)\b", reply, re.I):
+                fit = True
+            if not fit and re.search(r"\bsales advisor\b", reply, re.I) and re.search(
+                r"\b(let you know later|i will let you know|plan(?:\s+\w+){0,6}\s+later)\b",
+                customer,
+                re.I,
+            ):
+                fit = True
             results.append(
                 {
                     "turn_index": turn["turn_index"],
-                    "fit": answer in ("open_answer", "no") or (kind, answer) in _FIT,
+                    "fit": fit,
                     "na": False,
                     "question_kind": kind,
                     "answer_kind": answer,
@@ -407,7 +481,7 @@ def recommended_change(measured: dict[str, Any]) -> str | None:
     ]
     if misses:
         return (
-            f"At turn {misses[0]['turn_index']} the customer did not answer "
-            "the question that was asked."
+            f"At turn {misses[0]['turn_index']}, answer what the customer said. "
+            "Change the agent's reply."
         )
     return None

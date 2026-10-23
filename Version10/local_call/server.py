@@ -77,10 +77,17 @@ def payload_from(response):
     }
 
 
-def project_facts():
+def project_facts(record=None):
+    """Townpark facts, plus the card for every project named in this call."""
+    turns = (record or {}).get("turns") or []
+    blob = " ".join(
+        f"{turn.get('customer') or ''} {turn.get('reply') or ''}" for turn in turns
+    )
     return {
         "project": app_v3.PROJECT_KB,
         "sizes": app_v3.UNIT_SIZES,
+        "sizes_apply_to": "SOBHA Townpark only",
+        "catalog_cards": app_v3.catalog.cards_named_in(blob),
     }
 
 
@@ -136,7 +143,7 @@ async def _timed_chat(action):
 def _save_and_score():
     path = call_log.save(RUNS)
     record = call_log.as_dict()
-    result = evaluate_saved_call(record, RUNS, project_facts())
+    result = evaluate_saved_call(record, RUNS, project_facts(record))
     return {"saved": True, "call_id": record["call_id"], "scorecard": result["scorecard"], "path": path.name}
 
 
@@ -358,4 +365,4 @@ async def listen(file: UploadFile = File(...)):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(local_app, host="127.0.0.1", port=8015)
+    uvicorn.run(local_app, host="127.0.0.1", port=8017)

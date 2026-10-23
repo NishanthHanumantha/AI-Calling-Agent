@@ -342,6 +342,8 @@ def test_judge_prompt_allows_an_open_answer():
     assert "I don't need any details" in SYSTEM_PROMPT
     assert "A yes to a visit, a request to book one, a named day, or a clock time" in SYSTEM_PROMPT
     assert "Asking which day or listing those times is the wrong next step" in SYSTEM_PROMPT
+    assert "catalog_cards lists each project named in the call" in SYSTEM_PROMPT
+    assert "I will decide later" in SYSTEM_PROMPT
 
 
 def test_a_stated_menu_is_a_repeat_and_a_no_fits():
@@ -597,3 +599,236 @@ def test_spoken_size_says_square_feet():
         "Would you like to schedule a site visit to Sobha Townpark?"
     )
     assert "SOBHA" in app_v3.visit_schedule_question()
+
+
+def test_east_and_both_count_as_answers():
+    measured = score_measured({
+        "turns": [
+            {
+                "turn_index": 1,
+                "customer": None,
+                "reply": "Which part of Bengaluru are you considering — North, East, or South?",
+                "stage": "qualify",
+            },
+            {
+                "turn_index": 2,
+                "customer": "East Bengaluru.",
+                "reply": "May I know which configuration you are interested in?",
+                "stage": "qualify",
+            },
+            {
+                "turn_index": 3,
+                "customer": "Three BHK.",
+                "reply": "Which one shall I tell you about, or shall I cover both?",
+                "stage": "qualify",
+            },
+            {
+                "turn_index": 4,
+                "customer": "You can let me know about both.",
+                "reply": "What would you like to know about them?",
+                "stage": "answer_faq",
+            },
+        ]
+    })
+    fit = {item["turn_index"]: item["fit"] for item in measured["last_answer_fit"]}
+    assert fit[2] is True
+    assert fit[3] is True
+    assert fit[4] is True
+    assert recommended_change(measured) is None
+
+
+def test_naming_panathur_answers_the_place_question():
+    measured = score_measured({
+        "turns": [
+            {
+                "turn_index": 1,
+                "customer": None,
+                "reply": (
+                    "Okay, that's good. Are you looking closer to Whitefield, "
+                    "Panathur, Sarjapur, Koramangala, or Bhoganahalli?"
+                ),
+                "stage": "qualify",
+            },
+            {
+                "turn_index": 2,
+                "customer": "I'm fine with Panathur.",
+                "reply": "Which one shall I tell you about, or shall I cover both?",
+                "stage": "qualify",
+            },
+        ]
+    })
+    fit = {item["turn_index"]: item["fit"] for item in measured["last_answer_fit"]}
+    assert fit[2] is True
+
+
+def test_a_project_name_and_tell_me_about_that_count_as_answers():
+    measured = score_measured({
+        "turns": [
+            {
+                "turn_index": 1,
+                "customer": None,
+                "reply": "Which part of Bengaluru are you considering — North, East, or South?",
+                "stage": "qualify",
+            },
+            {
+                "turn_index": 2,
+                "customer": "I'm looking up in Townpark, Bangalore.",
+                "reply": "Are you looking at this to live in, or as an investment?",
+                "stage": "answer_faq",
+            },
+            {
+                "turn_index": 3,
+                "customer": "It's to live in.",
+                "reply": "Chartered Birdsong starts from INR 1.2 Crore. Shall I tell you about that?",
+                "stage": "qualify",
+            },
+            {
+                "turn_index": 4,
+                "customer": "You can tell me about that.",
+                "reply": "What would you like to know about it?",
+                "stage": "answer_faq",
+            },
+        ]
+    })
+    fit = {item["turn_index"]: item["fit"] for item in measured["last_answer_fit"]}
+    assert fit[2] is True
+    assert fit[3] is True
+    assert fit[4] is True
+    assert recommended_change(measured) is None
+
+
+def test_a_price_question_answers_the_open_question_and_the_miss_names_the_agent():
+    measured = score_measured({
+        "turns": [
+            {
+                "turn_index": 8,
+                "customer": "I am not sure about it.",
+                "reply": "That's alright. Would you like to know anything else about the project?",
+                "stage": "answer_faq",
+            },
+            {
+                "turn_index": 9,
+                "customer": "So what is the price of 4 BHK?",
+                "reply": "SOBHA Magnus starts from INR 3.4 Crore.",
+                "stage": "answer_faq",
+            },
+        ]
+    })
+    fit = {item["turn_index"]: item["fit"] for item in measured["last_answer_fit"]}
+    assert fit[9] is True
+    missed = score_measured({
+        "turns": [
+            {
+                "turn_index": 1,
+                "customer": None,
+                "reply": "Is now a good time for a quick call?",
+                "stage": "greeting",
+            },
+            {
+                "turn_index": 2,
+                "customer": "The weather is nice.",
+                "reply": "Our projects are in Bengaluru.",
+                "stage": "greeting",
+            },
+        ]
+    })
+    change = recommended_change(missed)
+    assert change is not None
+    assert "customer did not answer" not in change.lower()
+    assert "agent" in change.lower()
+
+
+def test_a_deferred_close_and_a_repeat_request_are_not_misses():
+    measured = score_measured({
+        "turns": [
+            {
+                "turn_index": 3,
+                "customer": None,
+                "reply": "May I know which configuration you are interested in?",
+                "stage": "qualify",
+            },
+            {
+                "turn_index": 4,
+                "customer": "I haven't finalized that. I will let you know later.",
+                "reply": "Are you looking at this to live in, or as an investment?",
+                "stage": "qualify",
+            },
+            {
+                "turn_index": 9,
+                "customer": "Now I'm good.",
+                "reply": "Would you like to schedule a site visit to SOBHA Magnus?",
+                "stage": "propose_slot",
+            },
+            {
+                "turn_index": 10,
+                "customer": "I will plan and let you know later.",
+                "reply": "I will have our sales advisor get in touch with you. Have a good day.",
+                "stage": "closed",
+            },
+        ]
+    })
+    fit = {item["turn_index"]: item["fit"] for item in measured["last_answer_fit"]}
+    assert fit[4] is True
+    assert fit[10] is True
+    assert recommended_change(measured) is None
+    repeated = score_measured({
+        "turns": [
+            {
+                "turn_index": 1,
+                "customer": None,
+                "reply": "Are you looking at this to live in, or as an investment?",
+                "stage": "qualify",
+            },
+            {
+                "turn_index": 2,
+                "customer": "IHT 11.",
+                "reply": (
+                    "Sorry, I didn't catch that. "
+                    "Are you looking at this to live in, or as an investment?"
+                ),
+                "stage": "qualify",
+            },
+        ]
+    })
+    fit = {item["turn_index"]: item["fit"] for item in repeated["last_answer_fit"]}
+    assert fit[2] is True
+    assert recommended_change(repeated) is None
+
+
+def test_decide_it_later_and_a_budget_count_as_answers():
+    measured = score_measured({
+        "turns": [
+            {
+                "turn_index": 3,
+                "customer": None,
+                "reply": "May I know which configuration you are interested in?",
+                "stage": "qualify",
+            },
+            {
+                "turn_index": 4,
+                "customer": "I will decide it later based on the price.",
+                "reply": "Are you looking at this to live in, or as an investment?",
+                "stage": "qualify",
+            },
+            {
+                "turn_index": 6,
+                "customer": None,
+                "reply": (
+                    "We have SOBHA Infinia, near Koramangala, "
+                    "whose price starts from INR 4.3 Crore. "
+                    "Would you be interested to know about the project?"
+                ),
+                "stage": "qualify",
+            },
+            {
+                "turn_index": 7,
+                "customer": "For me, my budget is below 2 crore.",
+                "reply": "SOBHA One World starts from INR 1.8 Crore.",
+                "stage": "qualify",
+            },
+        ]
+    })
+    fit = {item["turn_index"]: item["fit"] for item in measured["last_answer_fit"]}
+    assert fit[4] is True
+    assert fit[7] is True
+    assert recommended_change(measured) is None

@@ -344,50 +344,132 @@ def _price_sentence(project):
     return f"{project['spoken']} starts from {project['price_spoken']}."
 
 
+def spoken_area(project):
+    """A short place for speech. The spreadsheet cell is not read aloud in full."""
+    raw = project.get("location") or project.get("place") or ""
+    pieces = []
+    for piece in raw.split(","):
+        piece = piece.strip()
+        if not piece or piece.lower() in {"bengaluru", "bangalore"}:
+            continue
+        piece = piece.replace("-ORR", " ORR").replace("-orr", " ORR")
+        if piece.lower().startswith("off "):
+            piece = "off " + piece[4:]
+        pieces.append(piece)
+    return ", ".join(pieces) or (project.get("place") or raw)
+
+
+def place_sentence(project):
+    """The fullest stored place, in a short spoken sentence."""
+    area = spoken_area(project)
+    low = area.lower()
+    if low.startswith("near "):
+        return f"{project['spoken']} is near {area[5:]}."
+    if low.startswith("off "):
+        return f"{project['spoken']} is off {area[4:]}."
+    return f"{project['spoken']} is at {area}."
+
+
+def location_line(projects, name_projects=False):
+    """One place once when both projects share it. Otherwise one short sentence each."""
+    chosen = list(projects)[:2]
+    if (
+        len(chosen) == 2
+        and chosen[0].get("place")
+        and chosen[0]["place"] == chosen[1].get("place")
+    ):
+        area = spoken_area(chosen[0])
+        if name_projects:
+            return f"{chosen[0]['spoken']} and {chosen[1]['spoken']} are both at {area}."
+        return f"Both are at {area}."
+    lines = []
+    for project in chosen:
+        if name_projects:
+            lines.append(place_sentence(project))
+        else:
+            place = project.get("place") or spoken_area(project)
+            lines.append(f"{project['spoken']} is at {place}.")
+    return " ".join(lines)
+
+
+def cards_named_in(text):
+    """Short cards for projects whose name or place appears in the call."""
+    blob = (text or "").lower()
+    cards = []
+    for project in PROJECTS:
+        named = project["spoken"].lower() in blob
+        placed = project["place"] and project["place"].lower() in blob
+        if named or placed:
+            cards.append(card(project))
+    return cards
+
+
+def _pair_price(first, second):
+    """One price sentence when both start at the same amount."""
+    shared = first["place"] if first.get("place") and first["place"] == second.get("place") else ""
+    names = f"{first['spoken']} and {second['spoken']}"
+    where = f", both at {shared}" if shared else ""
+    same = (
+        first["price_known"]
+        and second["price_known"]
+        and first["price_spoken"] == second["price_spoken"]
+    )
+    if same:
+        return f"{names}{where} start from {first['price_spoken']}."
+    if shared:
+        return f"{names}{where}. {_price_sentence(first)} {_price_sentence(second)}"
+    return f"{_price_sentence(first)} {_price_sentence(second)}"
+
+
 def _lowest(projects, count):
     priced = [project for project in projects if project["price_crore"] is not None]
     priced.sort(key=lambda project: (project["price_crore"], project["spoken"]))
     return priced[:count]
 
 
-def suggestion(projects, ceiling=None, strict=False):
+_INTEREST = "Would you be interested to know about the project?"
+
+
+def _one_project_offer(project):
+    """A spoken introduction for the one project that matches."""
+    where = project["place"] or project["location"]
+    if project["price_known"]:
+        return (
+            f"We have {project['spoken']}, near {where}, "
+            f"whose price starts from {project['price_spoken']}. {_INTEREST}"
+        )
+    return (
+        f"We have {project['spoken']}, near {where}. "
+        f"The price will be discussed by our sales advisor. {_INTEREST}"
+    )
+
+
+def suggestion(projects, ceiling=None, strict=False, closest=False):
     """The spoken shortlist. A long list keeps the two lowest starting prices."""
-    if ceiling is not None and strict and ceiling <= 1:
+    if ceiling is not None and strict and ceiling <= 1 and not closest:
         plots = [project for project in projects if project["home_type"] == "plot"]
         if len(plots) == 1:
             project = plots[0]
             return (
                 f"{project['spoken']} is a plotted development in {project['part']} Bengaluru, "
-                f"starting from {project['price_spoken']}. Shall I tell you about that?"
+                f"starting from {project['price_spoken']}. {_INTEREST}"
             )
-    if len(projects) == 1:
-        project = projects[0]
-        where = project["place"] or project["location"]
-        if project["price_known"]:
-            return (
-                f"{project['spoken']}, near {where}, starts from {project['price_spoken']}. "
-                "Shall I tell you about that?"
-            )
-        return (
-            f"{project['spoken']}, near {where}. "
-            "The price will be discussed by our sales advisor. Shall I tell you about that?"
-        )
-    if len(projects) == 2:
+    if len(projects) == 1 and not closest:
+        return _one_project_offer(projects[0])
+    if len(projects) == 2 and not closest:
         first, second = projects
-        shared = first["place"] if first["place"] and first["place"] == second["place"] else ""
-        where = f", both at {shared}" if shared else ""
         return (
-            f"Two projects fit that: {first['spoken']} and {second['spoken']}{where}. "
-            f"{_price_sentence(first)} {_price_sentence(second)} "
+            f"{_pair_price(first, second)} "
             "Which one shall I tell you about, or shall I cover both?"
         )
-    places = []
-    for project in projects:
-        if project["place"] and project["place"] not in places:
-            places.append(project["place"])
-    if len(places) > 2:
-        listed = ", ".join(places[:-1]) + f", or {places[-1]}"
-        return f"A few projects fit that. Are you looking closer to {listed}?"
+    if not closest:
+        places = []
+        for project in projects:
+            if project["place"] and project["place"] not in places:
+                places.append(project["place"])
+        if len(places) > 2:
+            listed = ", ".join(places[:-1]) + f", or {places[-1]}"
+            return f"Okay, that's good. Are you looking closer to {listed}?"
     lowest = _lowest(projects, 2)
     if len(lowest) == 2:
         return (
