@@ -2688,6 +2688,39 @@ def test_a_budget_below_two_crore_stays_in_east():
     assert "valley view" not in low
 
 
+def test_a_north_budget_below_one_crore_names_the_east_project():
+    app_v3.conversation_memory.update({
+        "stage": "qualify",
+        "catalog_flow": True,
+        "awaiting_suggestion": True,
+        "pending_project_ids": ["chartered-birdsong"],
+        "customer_part": "North",
+        "purpose_skipped": True,
+        "last_agent_question": (
+            "We have Chartered Birdsong, near Rajanukunte, "
+            "whose price starts from INR 1.2 Crore. "
+            "Would you be interested to know about the project?"
+        ),
+    })
+    spoken, _, stage = _turn("Is there anything below 1 crore?")
+    assert CALLS == []
+    assert stage == "qualify"
+    low = spoken.lower()
+    assert "there is no north bengaluru project below 1 crore" in low
+    assert "sacred grove by the lake in east bengaluru starts from inr 86 lakh" in low
+    assert "shall i tell you about that" in low
+    assert "nothing stored" not in low
+    assert "look further" not in low
+    assert "1.0" not in spoken
+    spoken, _, stage = _turn("Yeah, you can let me know.")
+    assert CALLS == []
+    assert stage == "answer_faq"
+    low = spoken.lower()
+    assert "sacred grove" in low
+    assert "chikka tirupathi" in low
+    assert "anything else about the project" in low
+
+
 def test_floor_plans_during_a_visit_close_with_the_advisor():
     app_v3.conversation_memory.update({
         "stage": "propose_slot",

@@ -3456,6 +3456,19 @@ def _apartment_shortlist(matches):
     return matches
 
 
+def _budget_limit(ceiling, strict):
+    """Spoken ceiling. 'Below' is used only when the customer set a strict limit."""
+    if ceiling < 1:
+        amount = f"{int(round(ceiling * 100))} lakh"
+    elif ceiling == int(ceiling):
+        amount = f"{int(ceiling)} crore"
+    else:
+        amount = f"{ceiling:g} crore"
+    if strict:
+        return f"below {amount}"
+    return f"within {amount}"
+
+
 def _suggest_catalog():
     matches = _current_matches()
     ceiling = conversation_memory.get("price_ceiling")
@@ -3472,6 +3485,13 @@ def _suggest_catalog():
             return "ADVISOR"
         conversation_memory["pending_project_ids"] = [nearest["id"]]
         conversation_memory["awaiting_suggestion"] = True
+        part = conversation_memory.get("customer_part")
+        if part:
+            return (
+                f"There is no {part} Bengaluru project {_budget_limit(ceiling, strict)}. "
+                f"{nearest['spoken']} in {nearest['part']} Bengaluru starts from "
+                f"{nearest['price_spoken']}. Shall I tell you about that?"
+            )
         return (
             f"Nothing stored starts in that range. {nearest['spoken']} starts from "
             f"{nearest['price_spoken']}. Our sales advisor can look further. "
