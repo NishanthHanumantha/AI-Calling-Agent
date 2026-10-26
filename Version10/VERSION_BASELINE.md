@@ -1,8 +1,14 @@
 # Version baseline
 
-Version: V9 frozen / V10 development
+Version: V10 frozen / V11 development
 
-`Version10/` is the development copy. `Version9/`, `Version8/`, `Version7/`, `Version6/`, `Version5/`, `Version4/`, and `Version3/` stay frozen.
+`Version10/` is frozen as of 26 October 2026. It is the all-Sobha Bengaluru call: Sarvam as the caller, Sarvam speech-to-text, Sarvam Bulbul v3 speaker `ishita`, “sq. ft.” spoken as “square feet,” speech that starts on the first clause, and a shortlist that stays in the region the customer named. The call stays in English. Neerja speaks only when Bulbul returns no audio. Do not modify `Version10/`, `Version9/`, `Version8/`, `Version7/`, `Version6/`, `Version5/`, `Version4/`, or `Version3/`. Further development belongs in `Version11/`. Hindi, Kannada, and the other languages belong in Version 11.
+
+The notes below record how Version 10 was built. They are historical.
+
+Version at the time of those notes: V9 frozen / V10 development
+
+`Version10/` was the development copy. `Version9/`, `Version8/`, `Version7/`, `Version6/`, `Version5/`, `Version4/`, and `Version3/` stay frozen.
 
 Copied from `Version9/` on 22 October 2026, and only what the localhost call needs:
 
