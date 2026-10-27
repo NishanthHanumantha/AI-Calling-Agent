@@ -1229,3 +1229,26 @@ def test_a_failed_greeting_is_decoded_as_wav_and_does_not_listen():
     kept = page.index("callHeard = true")
     barge = page.index("armBargeIn(session)")
     assert started < heard < kept < barge
+
+
+def test_an_east_place_question_boosts_panathur_not_townpark():
+    import app_v3
+    from local_call.server import stt_keyterms
+
+    app_v3.reset_memory()
+    app_v3.conversation_memory.update({
+        "customer_part": "East",
+        "last_agent_question": (
+            "Are you looking closer to Whitefield, Panathur, Sarjapur, "
+            "Koramangala, or Bhoganahalli?"
+        ),
+    })
+    terms = stt_keyterms()
+    assert "Panathur" in terms
+    assert "Sarjapur" in terms
+    assert "Whitefield" in terms
+    assert "Townpark" not in terms
+    assert "Electronic City" not in terms
+
+    app_v3.conversation_memory.update({"customer_part": "South", "active_project_ids": ["sobha-townpark"]})
+    assert "Townpark" in stt_keyterms()

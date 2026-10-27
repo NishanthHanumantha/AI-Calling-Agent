@@ -1603,6 +1603,90 @@ def test_a_no_to_anything_else_offers_the_visit():
     assert stage == "propose_slot"
     assert "site visit" in spoken.lower()
 
+
+def test_other_projects_answers_from_the_stored_matches():
+    app_v3.conversation_memory.update({
+        "stage": "qualify",
+        "catalog_flow": True,
+        "awaiting_suggestion": True,
+        "pending_project_ids": ["sobha-one-world"],
+        "customer_part": "East",
+        "customer_bedrooms": 2,
+        "customer_configuration": "2 BHK",
+        "customer_purpose": "live",
+        "purpose_prompted": True,
+        "last_agent_question": (
+            "We have SOBHA One World, near Whitefield, whose price starts from INR 1.8 Crore. "
+            "Would you be interested to know about the project?"
+        ),
+    })
+    spoken, _, stage = _turn("Are there any other projects or is this the only one?")
+    assert CALLS == []
+    assert stage == "qualify"
+    low = spoken.lower()
+    assert "only one that matches" in low
+    assert "one world" in low
+    assert "next-gen" not in low
+    assert "mega community" not in low
+
+    app_v3.reset_memory()
+    CALLS.clear()
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "catalog_flow": True,
+        "catalog_done": True,
+        "active_project_ids": ["sobha-one-world"],
+        "customer_part": "East",
+        "customer_bedrooms": 2,
+        "customer_configuration": "2 BHK",
+        "customer_purpose": "live",
+        "last_agent_question": "Would you like to know anything else about the project?",
+    })
+    spoken, _, stage = _turn("Are there any other projects or is this the only one?")
+    assert CALLS == []
+    assert stage == "answer_faq"
+    low = spoken.lower()
+    assert "only one that matches" in low
+    assert "next-gen" not in low
+    assert "greater whitefield" not in low
+
+    app_v3.reset_memory()
+    CALLS.clear()
+    app_v3.conversation_memory.update({
+        "stage": "qualify",
+        "catalog_flow": True,
+        "awaiting_suggestion": True,
+        "pending_project_ids": ["sobha-townpark"],
+        "customer_part": "South",
+        "customer_bedrooms": 2,
+        "customer_configuration": "2 BHK",
+        "purpose_prompted": True,
+        "last_agent_question": "Would you be interested to know about the project?",
+    })
+    spoken, _, stage = _turn("Are there any other projects or is this the only one?")
+    assert CALLS == []
+    assert stage == "qualify"
+    low = spoken.lower()
+    assert "not the only one" in low
+    assert "valley view" in low
+    assert "next-gen" not in low
+
+
+def test_a_polite_no_after_anything_else_closes():
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "open_project_asked": True,
+        "catalog_flow": True,
+        "catalog_done": True,
+        "active_project_ids": ["sobha-one-world"],
+        "last_agent_question": "Would you like to know anything else about the project?",
+    })
+    spoken, _, stage = _turn("No, not that much, thank you.")
+    assert CALLS == []
+    assert stage == "closed"
+    assert "sales advisor" in spoken.lower()
+    assert "site visit" not in spoken.lower()
+
     app_v3.reset_memory()
     CALLS.clear()
     app_v3.conversation_memory.update({
@@ -2828,3 +2912,29 @@ def test_floor_plans_during_a_visit_close_with_the_advisor():
     assert "have a good day" in low
     assert "1304" not in spoken
     assert "1817" not in spoken
+
+
+def test_an_east_place_question_does_not_lock_townpark():
+    app_v3.conversation_memory.update({
+        "stage": "qualify",
+        "catalog_flow": True,
+        "part_asked": True,
+        "customer_part": "East",
+        "config_prompted": True,
+        "customer_bedrooms": 3,
+        "customer_configuration": "3 BHK",
+        "purpose_prompted": True,
+        "customer_purpose": "investment",
+        "last_agent_question": (
+            "Are you looking closer to Whitefield, Panathur, Sarjapur, "
+            "Koramangala, or Bhoganahalli?"
+        ),
+    })
+    spoken, _, stage = _turn("Yes, I am looking near Townpark.")
+    assert CALLS == []
+    assert stage == "qualify"
+    assert app_v3.conversation_memory["active_project_ids"] == []
+    low = spoken.lower()
+    assert "townpark" not in low
+    assert "panathur" in low
+    assert "whitefield" in low

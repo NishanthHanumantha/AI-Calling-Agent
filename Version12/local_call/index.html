@@ -562,6 +562,11 @@
       return current.calibrated && !nearFloor(current, level) && level > interruptThreshold(current);
     }
 
+    function aboveAgent(current, level) {
+      const agent = current.agentLevel || current.noiseFloor || 0.01;
+      return level > Math.max(0.14, agent * 4);
+    }
+
     function adoptSteadyRoom(current) {
       if (current.room.length > current.roomNeeded) {
         current.room.splice(0, current.room.length - current.roomNeeded);
@@ -690,7 +695,7 @@
           }
         }
         if (capture.phase === "confirm") {
-          if (clearRise(capture, level)) {
+          if (aboveAgent(capture, level)) {
             capture.speechBuffers += 1;
             capture.quietBuffers = 0;
             if (capture.speechBuffers >= capture.speechNeeded) commitBargeIn();
@@ -715,30 +720,26 @@
                 capture.noiseFloor = used[Math.floor((used.length - 1) / 2)];
               }
               capture.calibrated = true;
+              capture.agentLevel = capture.noiseFloor || 0.01;
               capture.loudBuffers = 0;
               capture.riseLevels = [];
-            }
-          } else if (adoptSteadyRoom(capture) || nearFloor(capture, level)) {
-            capture.loudBuffers = 0;
-            capture.riseLevels = [];
-          } else if (clearRise(capture, level)) {
-            capture.riseLevels.push(level);
-            capture.loudBuffers += 1;
-            if (
-              capture.loudBuffers >= capture.speechNeeded
-              && levelsAreSteady(capture.riseLevels)
-            ) {
-              capture.noiseFloor = levelMedian(capture.riseLevels);
-              capture.loudBuffers = 0;
-              capture.riseLevels = [];
-            } else if (capture.loudBuffers >= capture.speechNeeded && capture.onInterrupt) {
-              const notify = capture.onInterrupt;
-              capture.onInterrupt = null;
-              notify();
             }
           } else {
-            capture.loudBuffers = 0;
-            capture.riseLevels = [];
+            const playing = capture.room.length
+              ? levelMedian(capture.room)
+              : (capture.noiseFloor || 0.01);
+            capture.agentLevel = Math.max(capture.noiseFloor || 0.01, playing);
+            if (aboveAgent(capture, level)) {
+              capture.loudBuffers += 1;
+              if (capture.loudBuffers >= capture.speechNeeded && capture.onInterrupt) {
+                const notify = capture.onInterrupt;
+                capture.onInterrupt = null;
+                notify();
+              }
+            } else {
+              capture.loudBuffers = 0;
+              capture.riseLevels = [];
+            }
           }
           return;
         }
@@ -791,6 +792,10 @@
 
     function beginConfirm(session) {
       if (!capture || !session || session.closed) return;
+      const heard = capture.riseLevels && capture.riseLevels.length
+        ? levelMedian(capture.riseLevels)
+        : (capture.room.length ? levelMedian(capture.room) : (capture.noiseFloor || 0.01));
+      capture.agentLevel = Math.max(capture.noiseFloor || 0.01, heard);
       if (session.audio.hold) session.audio.hold();
       else session.audio.pause();
       capture.phase = "confirm";
@@ -846,7 +851,9 @@
     }
 
     async function listen() {
-      if (!active || busy || capture) return;
+      if (!active || busy) return;
+      if (capture && (capture.phase === "interrupt" || capture.phase === "confirm")) releaseMic();
+      if (capture) return;
       setStatus("Listening. Speak, then pause, or click Done speaking.");
       await openCapture("customer");
     }
@@ -922,7 +929,8 @@
           missedClause();
           return;
         }
-        if (!active || outcome === "interrupted") return;
+        if (!active) return;
+        if (outcome === "interrupted" && capture && capture.phase === "customer") return;
       }
       busy = false;
       if (data.ended) {

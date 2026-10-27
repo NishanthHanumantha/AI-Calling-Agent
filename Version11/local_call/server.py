@@ -8,6 +8,7 @@ The page speaks the first clause before the later clauses are synthesized.
 
 import base64
 import io
+import json
 import re
 import struct
 import sys
@@ -419,6 +420,35 @@ def clip_has_speech(audio: bytes, min_seconds: float = 0.45) -> bool:
     return (loud * frame_n / rate) >= min_seconds
 
 
+def stt_keyterms():
+    """Boost the places just asked. Townpark is boosted only for a South call."""
+    memory = app_v3.conversation_memory
+    last = memory.get("last_agent_question") or ""
+    offered = app_v3.catalog.places_mentioned(last) if "closer to" in last.lower() else []
+    terms = ["SOBHA", "BHK"]
+    if offered:
+        terms.extend(offered)
+    else:
+        terms.extend(["Whitefield", "Electronic City", "Hosur Road"])
+    south_places = {"electronic city", "bannerghatta", "banashankari"}
+    east_places = {"panathur", "whitefield", "sarjapur", "koramangala", "bhoganahalli"}
+    south_question = bool(offered) and any(place.lower() in south_places for place in offered) and not any(
+        place.lower() in east_places for place in offered
+    )
+    if (
+        "sobha-townpark" in (memory.get("active_project_ids") or [])
+        or memory.get("customer_part") == "South"
+        or south_question
+        or "townpark" in last.lower()
+    ):
+        terms.append("Townpark")
+    seen = []
+    for term in terms:
+        if term not in seen:
+            seen.append(term)
+    return json.dumps(seen)
+
+
 BOOSTED_KEYTERMS = (
     "electronic city",
     "hosur road",
@@ -460,7 +490,7 @@ async def listen(file: UploadFile = File(...), heard: str = Form("1")):
             "model": "saaras:v4",
             "mode": "translate",
             "language_code": app_v3.stt_language_code(),
-            "keyterms": '["SOBHA","Townpark","BHK","Whitefield","Electronic City","Hosur Road"]',
+            "keyterms": stt_keyterms(),
         },
         timeout=30,
     )

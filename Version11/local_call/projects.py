@@ -248,11 +248,22 @@ def part_of_city(text):
 
 
 def place_named(text):
+    found = places_mentioned(text)
+    return found[0] if found else None
+
+
+def places_mentioned(text):
+    """Every stored place named in the text, in catalog order."""
     low = (text or "").lower()
+    found = []
+    seen = set()
     for project in PROJECTS:
-        if project["place"] and project["place"].lower() in low:
-            return project["place"]
-    return None
+        place = project.get("place") or ""
+        key = place.lower()
+        if place and key in low and key not in seen:
+            seen.add(key)
+            found.append(place)
+    return found
 
 
 def bedrooms_named(text):

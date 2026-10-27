@@ -1934,10 +1934,23 @@ def last_question_is_open_project():
     return "anything else" in last and "project" in last
 
 
+def _politely_finished(text):
+    """A no with thanks, or 'not that much', is finished. A bare no is not."""
+    low = (text or "").lower()
+    if re.search(r"\bnot that much\b", low):
+        return True
+    return (
+        re.search(r"\bthank you\b", low) is not None
+        and re.search(r"\b(no|nothing|that'?s all|thats all)\b", low) is not None
+    )
+
+
 def reply_for_open_project(user_text):
-    """A yes invites their question. A no offers the visit."""
+    """A yes invites their question. A bare no offers the visit. Thanks closes."""
     if not last_question_is_open_project():
         return None
+    if _politely_finished(user_text):
+        return "ADVISOR"
     if is_direct_project_question(user_text) or is_new_faq_question(user_text):
         return None
     low = (user_text or "").lower()
@@ -3789,6 +3802,57 @@ def _asks_where(text):
     ) is not None
 
 
+def _asks_about_other_projects(text):
+    """The customer asked whether any other stored project matches."""
+    return re.search(
+        r"\b(other projects?|another projects?|only one|only this)\b",
+        text or "",
+        re.I,
+    ) is not None
+
+
+def _reply_for_other_projects(offered):
+    """Name the other matches. An empty list says the offer is the only one."""
+    offered = [project for project in (offered or []) if project]
+    offered_ids = {project["id"] for project in offered}
+    others = [
+        project for project in _current_matches()
+        if project["id"] not in offered_ids
+    ]
+    if not others:
+        if len(offered) == 1:
+            name = offered[0]["spoken"]
+            if conversation_memory.get("catalog_done"):
+                return f"Yes, {name} is the only one that matches. {OPEN_PROJECT_QUESTION}"
+            return (
+                f"Yes, {name} is the only one that matches. "
+                "Would you be interested to know about the project?"
+            )
+        if len(offered) >= 2:
+            return (
+                f"Yes, {offered[0]['spoken']} and {offered[1]['spoken']} "
+                "are the ones that match."
+            )
+        return "Yes, that is the only one that matches."
+    if len(offered) == 1:
+        lead = f"No, {offered[0]['spoken']} is not the only one."
+    else:
+        lead = "No, these are not the only ones."
+    closest = len(others) > 2
+    shown = others
+    if closest:
+        shown = sorted(
+            (project for project in others if project["price_crore"] is not None),
+            key=lambda project: (project["price_crore"], project["spoken"]),
+        )[:2]
+    conversation_memory["pending_project_ids"] = [project["id"] for project in shown]
+    conversation_memory["awaiting_suggestion"] = True
+    conversation_memory["active_project_ids"] = []
+    conversation_memory["catalog_done"] = False
+    conversation_memory["stage"] = "qualify"
+    return f"{lead} {catalog.suggestion(others, closest=closest)}"
+
+
 def _offered_pair(user_text, pending, named):
     """Both offered projects, when they say both, the projects, or name both."""
     if len(pending) < 2:
@@ -3824,6 +3888,8 @@ def _answer_suggestion(user_text):
         for item in (conversation_memory.get("pending_project_ids") or [])
         if item in catalog.BY_ID
     ]
+    if _asks_about_other_projects(user_text):
+        return _reply_for_other_projects(pending)
     if _asks_where(user_text) and pending:
         pair = _offered_pair(user_text, pending, named)
         if pair:
@@ -3873,6 +3939,14 @@ def _answer_suggestion(user_text):
     return nxt
 
 
+def _offered_places():
+    """Places named in the location question just asked."""
+    last = conversation_memory.get("last_agent_question") or ""
+    if "closer to" not in last.lower():
+        return []
+    return catalog.places_mentioned(last)
+
+
 def catalog_reply(user_text):
     """Optional area, configuration, and purpose, then the closest stored projects."""
     if not conversation_memory.get("catalog_flow"):
@@ -3900,6 +3974,8 @@ def catalog_reply(user_text):
         continued = _continue_after_pair(user_text)
         if continued:
             return continued
+        if _asks_about_other_projects(user_text):
+            return _reply_for_other_projects(_focused_projects())
         details = _more_about_locked(user_text)
         if details:
             return details
@@ -3917,9 +3993,24 @@ def catalog_reply(user_text):
             return "I can arrange a visit once we choose a project. " + question
         return _suggest_catalog()
     named = catalog.project_named_in(user_text)
+    offered = _offered_places()
+    if offered:
+        allowed = {place.lower() for place in offered}
+        named = [
+            project
+            for project in named
+            if (project.get("place") or "").lower() in allowed
+        ]
     if catalog.outside_project_named(user_text) and not named:
         return "ADVISOR"
     _absorb_catalog(user_text)
+    if (
+        offered
+        and not catalog.place_named(user_text)
+        and not named
+        and not _skips_catalog_question(user_text)
+    ):
+        return conversation_memory.get("last_agent_question")
     if len(named) == 1:
         _remember_projects(named)
         line = f"Alright, I'll stay with {named[0]['spoken']}."
