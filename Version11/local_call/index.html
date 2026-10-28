@@ -92,10 +92,22 @@
     let capture = null;
     let currentAudio = null;
     let liveSpeech = null;
+    let replyHanded = false;
     let scoring = false;
     let playback = null;
     let greetingAudible = false;
     let callHeard = false;
+    let bargeInReady = false;
+    let holdQuietDone = null;
+    let holdTimer = 0;
+
+    function finishHold(spoke) {
+      clearTimeout(holdTimer);
+      holdTimer = 0;
+      const done = holdQuietDone;
+      holdQuietDone = null;
+      if (done) done(spoke);
+    }
 
     function setStatus(text) { statusEl.textContent = text; }
 
@@ -138,7 +150,26 @@
       setTimeout(() => { if (active && !busy) listen(); }, 600);
     }
 
+    function namedParts(text) {
+      const words = new Set((text || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/));
+      return ["north", "east", "south"].filter((part) => words.has(part));
+    }
+
+    function namedPlaces(text) {
+      const low = (text || "").toLowerCase();
+      const places = [
+        "electronic city", "whitefield", "panathur", "sarjapur", "koramangala",
+        "bannerghatta", "chikka tirupathi", "rajanukunte", "banashankari",
+        "kannamangala", "bhoganahalli"
+      ];
+      return places.filter((place) => low.includes(place));
+    }
+
     function isEcho(transcript, line) {
+      if (namedParts(transcript).length === 1) return false;
+      const chosen = namedPlaces(transcript);
+      const offered = namedPlaces(line);
+      if (chosen.length === 1 && offered.length > 1 && offered.includes(chosen[0])) return false;
       const said = spokenWords(transcript);
       const agent = new Set(spokenWords(line));
       if (said.length < 2 || agent.size === 0) return false;
@@ -212,9 +243,17 @@
     function playClip(line, clip) {
       return new Promise((resolve) => {
         let settled = false;
+        let clipTimer = 0;
+        let session = null;
         const finish = (outcome) => {
           if (settled) return;
           settled = true;
+          if (clipTimer) clearTimeout(clipTimer);
+          if (session) {
+            session.closed = true;
+            if (liveSpeech === session) liveSpeech = null;
+            if (currentAudio === session.audio) currentAudio = null;
+          }
           resolve(outcome);
         };
         const url = clip.url;
@@ -238,7 +277,7 @@
         };
         clip.audio = audio;
         currentAudio = audio;
-        const session = { audio, url, line, finish, closed: false };
+        session = { audio, url, line, finish, closed: false };
         liveSpeech = session;
         const giveUp = () => {
           session.closed = true;
@@ -252,13 +291,27 @@
           giveUp();
           return;
         }
+        const armDeadline = (ms) => {
+          if (clipTimer) clearTimeout(clipTimer);
+          clipTimer = setTimeout(() => {
+            try { if (audio._source) audio._source.stop(); } catch (error) {}
+            finish("finished");
+          }, ms);
+        };
+        armDeadline(15000);
         clip.blob.arrayBuffer().then((bytes) => ctx.decodeAudioData(playableWav(bytes))).then((buffer) => {
-          if (settled || !active || liveSpeech !== session) {
+          if (settled) return;
+          if (!active || audio._stop) {
             URL.revokeObjectURL(url);
+            finish("interrupted");
             return;
           }
           const startNode = () => {
-            if (settled || !active || liveSpeech !== session) return;
+            if (settled) return;
+            if (!active || audio._stop) {
+              finish("interrupted");
+              return;
+            }
             if (!buffer || buffer.duration <= 0) {
               giveUp();
               return;
@@ -270,13 +323,14 @@
             source.onended = () => {
               audio.ended = true;
               audio.paused = true;
-              if (audio._stop || settled || liveSpeech !== session) return;
+              if (settled) return;
+              const stopped = audio._stop;
               session.closed = true;
               if (capture && capture.phase === "interrupt") releaseMic();
               URL.revokeObjectURL(url);
               if (currentAudio === audio) currentAudio = null;
-              liveSpeech = null;
-              finish("finished");
+              if (liveSpeech === session) liveSpeech = null;
+              finish(stopped ? "interrupted" : "finished");
             };
             audio.paused = false;
             try {
@@ -287,7 +341,9 @@
             }
             greetingAudible = true;
             callHeard = true;
-            armBargeIn(session);
+            if (bargeInReady) armBargeIn(session);
+            else armGreetingListen();
+            armDeadline((buffer.duration + 2) * 1000);
           };
           const resumed = ctx.resume();
           if (resumed && resumed.then) resumed.then(startNode).catch(giveUp);
@@ -397,7 +453,11 @@
         }
         const outcome = await pending;
         if (outcome === "interrupted") {
-          job.current = clip;
+          job.stopped = true;
+          job.current = null;
+          if (job.abort) job.abort.abort();
+          dropWaitingClip(job);
+          if (playback === job) playback = null;
           return "interrupted";
         }
         if (outcome === "failed") {
@@ -422,6 +482,7 @@
     }
 
     async function beginPlayback(text) {
+      replyHanded = false;
       const clauses = await fetchClauses(text);
       if (!active) return "interrupted";
       const job = {
@@ -565,7 +626,7 @@
     }
 
     function armSilenceTimer() {
-      if (!capture || capture.maxTimer) return;
+      if (!capture || capture.maxTimer || holdQuietDone) return;
       capture.maxTimer = setTimeout(() => {
         const blob = finishCapture();
         if (blob) {
@@ -578,11 +639,34 @@
     function takeCustomerTurn() {
       const blob = finishCapture();
       if (blob) {
+        finishHold(true);
         busy = true;
         sendAudio(blob).catch((error) => endCall(error.message));
         return;
       }
+      if (holdQuietDone) {
+        listen();
+        return;
+      }
       if (active && !busy) listen();
+    }
+
+    async function holdQuiet(seconds) {
+      clearTimeout(holdTimer);
+      setStatus("Waiting.");
+      await openCapture("customer");
+      if (capture) {
+        clearTimeout(capture.maxTimer);
+        capture.maxTimer = 0;
+      }
+      return new Promise((resolve) => {
+        holdQuietDone = resolve;
+        holdTimer = setTimeout(() => {
+          holdTimer = 0;
+          releaseMic();
+          finishHold(false);
+        }, Math.max(1, Number(seconds) || 45) * 1000);
+      });
     }
 
     let openingMic = null;
@@ -625,11 +709,12 @@
         speechNeeded: Math.max(3, Math.round(0.45 / frameSeconds)),
         interruptNeeded: Math.max(3, Math.round(1 / frameSeconds)),
         leadBuffers: Math.max(1, Math.round(0.15 / frameSeconds)),
-        maxTimer: 0, phase, onInterrupt: null,
+        maxTimer: 0, phase, onInterrupt: null, speechHeld: false,
         ignoreUntil: phase === "customer" ? performance.now() + 400 : 0
       };
       processor.onaudioprocess = (event) => {
         if (!capture || busy) return;
+        if (capture.phase === "greeting" && capture.speechHeld) return;
         if (capture.phase === "customer" && performance.now() < capture.ignoreUntil) return;
         const channel = new Float32Array(event.inputBuffer.getChannelData(0));
         capture.parts.push(channel);
@@ -670,6 +755,63 @@
             kept.forEach((part) => capture.parts.push(part));
             notify();
           }
+          return;
+        }
+        if (capture.phase === "greeting") {
+          if (!capture.calibrated) {
+            capture.room.push(level);
+            if (capture.room.length < 6) return;
+            const sorted = capture.room.slice().sort((a, b) => a - b);
+            const low = sorted[0];
+            const high = sorted[sorted.length - 1];
+            const steady = high - low < 0.015 || high < low * 1.4 + 0.005;
+            const mid = sorted[Math.floor((sorted.length - 1) / 2)];
+            if (steady && mid <= 0.08) capture.noiseFloor = mid;
+            else if (!steady) {
+              const basis = sorted.filter((value) => value <= Math.max(0.04, low * 2));
+              const used = basis.length ? basis : [low];
+              capture.noiseFloor = used[Math.floor((used.length - 1) / 2)];
+            }
+            capture.calibrated = true;
+            capture.speechBuffers = 0;
+            capture.pendingStart = -1;
+            capture.heardSpeech = false;
+            const threshold = interruptThreshold(capture);
+            const offset = capture.parts.length - capture.room.length;
+            capture.room.forEach((value, index) => {
+              if (value > threshold) {
+                if (capture.speechBuffers === 0) capture.pendingStart = offset + index;
+                capture.speechBuffers += 1;
+                if (capture.speechBuffers >= capture.speechNeeded && capture.speechStart < 0) {
+                  capture.heardSpeech = true;
+                  capture.speechStart = capture.pendingStart;
+                  setStatus("Hearing you.");
+                }
+              } else {
+                capture.speechBuffers = 0;
+                capture.pendingStart = -1;
+              }
+            });
+            return;
+          }
+          if (level > interruptThreshold(capture)) {
+            if (capture.speechBuffers === 0) capture.pendingStart = capture.parts.length - 1;
+            capture.speechBuffers += 1;
+            capture.quietBuffers = 0;
+            if (!capture.heardSpeech && capture.speechBuffers >= capture.speechNeeded) {
+              capture.heardSpeech = true;
+              capture.speechStart = capture.pendingStart;
+              setStatus("Hearing you.");
+            }
+            return;
+          }
+          if (!capture.heardSpeech) {
+            capture.speechBuffers = 0;
+            capture.pendingStart = -1;
+            return;
+          }
+          capture.quietBuffers += 1;
+          if (capture.quietBuffers >= 12) capture.speechHeld = true;
           return;
         }
         const opened = noteRoom(capture, level);
@@ -733,6 +875,11 @@
       };
     }
 
+    async function armGreetingListen() {
+      if (!active || capture) return;
+      await openCapture("greeting");
+    }
+
     async function listen() {
       if (!active || busy || capture) return;
       setStatus("Listening. Speak, then pause, or click Done speaking.");
@@ -758,7 +905,7 @@
       const job = playback;
       const moreWaiting = job && !job.stopped && (job.index + 1 < job.clauses.length || job.upcoming || job.ready);
       if (!response.ok || data.error || !text || (held && isEcho(text, held.line))) {
-        if (job && (held && !held.audio.ended || moreWaiting)) {
+        if (!replyHanded && job && (held && !held.audio.ended || moreWaiting)) {
           if (held && held.audio.ended) {
             job.index += 1;
             job.current = null;
@@ -769,7 +916,9 @@
             missedClause();
             return;
           }
-          if (!active || outcome === "interrupted") return;
+          if (!active) return;
+          if (outcome === "interrupted") cancelPlayback();
+          replyHanded = true;
           listen();
           return;
         }
@@ -805,22 +954,60 @@
         setStatus("Speaking.");
         busy = false;
         greetingAudible = false;
+        bargeInReady = callHeard;
         const outcome = await beginPlayback(data.reply);
-        if (outcome === "failed") {
+        if (!active) return;
+        if (outcome === "failed" && !callHeard) {
           missedClause();
           return;
         }
-        if (!active || outcome === "interrupted") return;
+        if ((outcome === "interrupted" || outcome === "failed") && capture) releaseMic();
+        cancelPlayback();
+        replyHanded = true;
       }
       busy = false;
       if (data.ended) {
         endCall("Call ended.");
         return;
       }
+      if (openingMic) await openingMic;
+      if (!active) return;
+      if (capture && capture.phase === "greeting") {
+        const blob = finishCapture();
+        if (blob) {
+          sendAudio(blob).catch((error) => endCall(error.message));
+          return;
+        }
+      }
+      if (data.wait_seconds && data.follow_up) {
+        const spoke = await holdQuiet(data.wait_seconds);
+        if (!active || spoke) return;
+        const resumed = await fetch("/local/resume", { method: "POST" });
+        const next = await resumed.json();
+        if (next.reply) {
+          addLine("Agent", next.reply);
+          setStatus("Speaking.");
+          const outcome = await beginPlayback(next.reply);
+          if (!active) return;
+          if (outcome === "failed" && !callHeard) {
+            missedClause();
+            return;
+          }
+          cancelPlayback();
+          replyHanded = true;
+        }
+        if (next.ended) {
+          endCall("Call ended.");
+          return;
+        }
+        listen();
+        return;
+      }
       listen();
     }
 
     async function endCall(message) {
+      finishHold(true);
       const shouldScore = active && !scoring;
       active = false;
       busy = false;
@@ -870,8 +1057,13 @@
       const watching = capture && capture.phase === "interrupt";
       const blob = finishCapture();
       if (blob) {
+        finishHold(true);
         busy = true;
         sendAudio(blob).catch((error) => endCall(error.message));
+        return;
+      }
+      if (holdQuietDone) {
+        finishHold(false);
         return;
       }
       if (watching && session && !session.closed && !session.audio.paused && active) {

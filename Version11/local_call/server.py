@@ -12,8 +12,10 @@ import json
 import re
 import struct
 import sys
+import threading
 import time
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import edge_tts
@@ -73,11 +75,16 @@ def spoken_reply(xml):
 
 def payload_from(response):
     xml = response.body.decode() if isinstance(response.body, bytes) else response.body
-    return {
+    payload = {
         "reply": spoken_reply(xml),
         "ended": "<Hangup" in xml,
         "stage": app_v3.conversation_memory.get("stage", ""),
     }
+    follow = (app_v3.conversation_memory.get("question_after_hold") or "").strip()
+    if follow and "i will wait" in payload["reply"].lower():
+        payload["wait_seconds"] = 45
+        payload["follow_up"] = follow
+    return payload
 
 
 def project_facts(record=None):
@@ -106,7 +113,21 @@ async def start_call():
     call_log.begin()
     payload = payload_from(await app_v3.voice())
     call_log.add_reply(payload["reply"], payload["stage"], None)
+    prepare_upcoming(payload["reply"])
     return payload
+
+
+@local_app.post("/local/resume")
+def resume_after_hold():
+    """Speak the saved question after a quiet hold. This does not call the model."""
+    question = (app_v3.conversation_memory.get("question_after_hold") or "").strip()
+    app_v3.conversation_memory["question_after_hold"] = ""
+    if question:
+        app_v3.remember_spoken(question)
+    stage = app_v3.conversation_memory.get("stage", "")
+    call_log.add_reply(question, stage, None)
+    prepare_upcoming(question)
+    return {"reply": question, "ended": False, "stage": stage}
 
 
 @local_app.post("/local/turn")
@@ -119,6 +140,7 @@ async def take_turn(turn: Turn):
     response, llm_ms = await _timed_chat(run)
     payload = payload_from(response)
     call_log.add_reply(payload["reply"], payload["stage"], llm_ms, customer=speech)
+    prepare_upcoming(payload["reply"])
     return payload
 
 
@@ -144,6 +166,7 @@ async def _timed_chat(action):
 
 
 def _save_and_score():
+    call_log.callback_when = app_v3.conversation_memory.get("callback_when")
     path = call_log.save(RUNS)
     record = call_log.as_dict()
     result = evaluate_saved_call(record, RUNS, project_facts(record))
@@ -194,10 +217,21 @@ def speaking_style(text):
     return 1.0, 0.6
 
 
-def translate_text(text, target):
-    """One English clause in the customer's language. None when translation does not return text."""
-    if target not in app_v3.SPOKEN_LANGUAGES or not app_v3.SARVAM_API_KEY or not (text or "").strip():
-        return None
+_translation_cache = {}
+_translation_pending = {}
+_translation_lock = threading.Lock()
+_translation_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="translate")
+
+
+def clear_translations():
+    """Drop cached clauses. Used by tests so one call does not answer the next."""
+    with _translation_lock:
+        _translation_cache.clear()
+        _translation_pending.clear()
+
+
+def _request_translation(text, target):
+    """Ask Sarvam for one clause. None when the call does not return text."""
     try:
         response = requests.post(
             TRANSLATE_URL,
@@ -227,6 +261,187 @@ def translate_text(text, target):
     except Exception:
         return None
     return translated or None
+
+
+def _fetch_and_store(clause, language):
+    translated = _request_translation(clause, language)
+    if translated:
+        with _translation_lock:
+            _translation_cache[(language, clause)] = translated
+    return translated
+
+
+def _release_translation(key, future):
+    with _translation_lock:
+        if _translation_pending.get(key) is future:
+            _translation_pending.pop(key, None)
+
+
+def _enqueue(clause, language):
+    """Start a translation if this clause is not already ready or in flight."""
+    clause = (clause or "").strip()
+    if (
+        not clause
+        or language not in app_v3.SPOKEN_LANGUAGES
+        or not app_v3.SARVAM_API_KEY
+    ):
+        return
+    key = (language, clause)
+    with _translation_lock:
+        if key in _translation_cache or key in _translation_pending:
+            return
+        future = _translation_pool.submit(_fetch_and_store, clause, language)
+        _translation_pending[key] = future
+    future.add_done_callback(lambda done, item=key: _release_translation(item, done))
+
+
+def translate_text(text, target):
+    """One English clause in the customer's language. A cached clause is not requested again."""
+    clause = (text or "").strip()
+    if target not in app_v3.SPOKEN_LANGUAGES or not app_v3.SARVAM_API_KEY or not clause:
+        return None
+    key = (target, clause)
+    with _translation_lock:
+        cached = _translation_cache.get(key)
+        if cached:
+            return cached
+        future = _translation_pending.get(key)
+        if future is None:
+            future = _translation_pool.submit(_fetch_and_store, clause, target)
+            _translation_pending[key] = future
+            future.add_done_callback(lambda done, item=key: _release_translation(item, done))
+    try:
+        return future.result(timeout=2) or None
+    except Exception:
+        return None
+
+
+def _fixed_lines():
+    """Qualification lines spoken on every call, area question first."""
+    return [
+        "Thanks for taking the call. " + app_v3.catalog.AREA_QUESTION,
+        app_v3.catalog.CONFIGURATION_QUESTION,
+        app_v3.catalog.PURPOSE_QUESTION,
+        "Got it. You're looking at this as an investment.",
+        "Got it. You're looking at this for your own use.",
+        "Would you be interested to know about the project?",
+        app_v3.ADVISOR_CLOSE,
+    ]
+
+
+def _predicted_offer():
+    """The catalog line that follows a purpose answer. It does not change the call."""
+    matches = app_v3._current_matches()
+    if not matches:
+        return ""
+    ceiling = app_v3.conversation_memory.get("price_ceiling")
+    strict = bool(app_v3.conversation_memory.get("price_strict"))
+    gave_part = bool(
+        app_v3.conversation_memory.get("customer_part")
+        or app_v3.conversation_memory.get("customer_place")
+    )
+    listed = app_v3._apartment_shortlist(matches)
+    if (
+        len(listed) > 2
+        and gave_part
+        and not app_v3.conversation_memory.get("narrow_asked")
+        and not app_v3.conversation_memory.get("customer_place")
+    ):
+        return app_v3.catalog.suggestion(listed, bedrooms=app_v3._stated_bedrooms()) or ""
+    closest = len(matches) > 2
+    return app_v3.catalog.suggestion(
+        matches,
+        ceiling=ceiling,
+        strict=strict,
+        closest=closest,
+        bedrooms=app_v3._stated_bedrooms(),
+    ) or ""
+
+
+def _preview_overview(projects):
+    """The overview a yes would speak, without marking the project as opened."""
+    chosen = list(projects)[:2]
+    if not chosen:
+        return ""
+    shared = (
+        len(chosen) == 2
+        and chosen[0].get("place")
+        and chosen[0]["place"] == chosen[1].get("place")
+    )
+    parts = [
+        app_v3._theme_sentence(project, include_place=not shared)
+        for project in chosen
+    ]
+    if shared:
+        parts.append(app_v3.catalog.location_line(chosen))
+    if not app_v3._configuration_already_chosen():
+        parts.extend(app_v3._home_line(project, include_size=True) for project in chosen)
+    question = (
+        app_v3.OPEN_PROJECTS_QUESTION if len(chosen) > 1 else app_v3.OPEN_PROJECT_QUESTION
+    )
+    parts.append(question)
+    return " ".join(part for part in parts if part)
+
+
+def _offered_overviews():
+    pending = [
+        app_v3.catalog.BY_ID[item]
+        for item in (app_v3.conversation_memory.get("pending_project_ids") or [])
+        if item in app_v3.catalog.BY_ID
+    ]
+    if not pending:
+        return []
+    lines = []
+    if len(pending) >= 2:
+        lines.append(_preview_overview(pending[:2]))
+    for project in pending[:2]:
+        lines.append(_preview_overview([project]))
+    return lines
+
+
+def _upcoming_lines(reply):
+    """The next spoken line, now that the call is in one language."""
+    low = (reply or "").lower()
+    lines = []
+    if "part of bengaluru" in low or "which part" in low:
+        lines.append(app_v3.catalog.CONFIGURATION_QUESTION)
+    if "which configuration" in low:
+        lines.append(app_v3.catalog.PURPOSE_QUESTION)
+    if "live in" in low and "investment" in low:
+        offer = _predicted_offer()
+        if offer:
+            lines.append("Got it. You're looking at this as an investment. " + offer)
+            lines.append("Got it. You're looking at this for your own use. " + offer)
+        else:
+            lines.append("Got it. You're looking at this as an investment.")
+            lines.append("Got it. You're looking at this for your own use.")
+    if (
+        "interested to know about the project" in low
+        or "which one shall i tell you about" in low
+        or "shall i cover both" in low
+    ):
+        lines.extend(_offered_overviews())
+    return lines
+
+
+def _enqueue_lines(lines, languages):
+    for line in lines:
+        for clause in speech_clauses(line):
+            for language in languages:
+                _enqueue(clause, language)
+
+
+def prepare_upcoming(reply):
+    """Translate the next line before the customer finishes answering."""
+    try:
+        language = app_v3.customer_language()
+        if language == "en-IN":
+            _enqueue_lines(_fixed_lines(), app_v3.SPOKEN_LANGUAGES)
+            return
+        if language in app_v3.SPOKEN_LANGUAGES:
+            _enqueue_lines(_upcoming_lines(reply), [language])
+    except Exception as exc:
+        print("LOCAL TRANSLATE PREPARE:", type(exc).__name__)
 
 
 def _bulbul_body(text, language_code):
@@ -320,12 +535,30 @@ def lone_yes(transcript):
     return raw in {"yeah", "yes", "ya", "ok", "okay", "yep"}
 
 
+def _named_parts(text):
+    """North, East, or South named as whole words."""
+    raw = re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())
+    words = set(raw.split())
+    return [part for part in ("north", "east", "south") if part in words]
+
+
+def _one_offered_place(transcript, line):
+    """One place chosen from a question that listed more than one."""
+    offered = app_v3.catalog.places_mentioned(line or "")
+    named = app_v3.catalog.places_mentioned(transcript or "")
+    return len(offered) > 1 and len(named) == 1 and named[0] in offered
+
+
 def mostly_echo(transcript, line):
     """True when most of the heard words are already in the line just spoken."""
     def words(text):
         raw = re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())
         return [word for word in raw.split() if len(word) > 1]
 
+    if len(_named_parts(transcript)) == 1:
+        return False
+    if _one_offered_place(transcript, line):
+        return False
     said = words(transcript)
     agent = set(words(line))
     if len(said) < 2 or not agent:
@@ -426,10 +659,16 @@ def stt_keyterms():
     last = memory.get("last_agent_question") or ""
     offered = app_v3.catalog.places_mentioned(last) if "closer to" in last.lower() else []
     terms = ["SOBHA", "BHK"]
+    low = last.lower()
+    part_question = "part of bengaluru" in low or "which part" in low
     if offered:
         terms.extend(offered)
-    else:
-        terms.extend(["Whitefield", "Electronic City", "Hosur Road"])
+    elif part_question:
+        terms.extend(["Bengaluru", "Bangalore", "North", "East", "South", "West"])
+    elif memory.get("customer_part") == "East":
+        terms.extend(["Whitefield", "Panathur", "Sarjapur", "Koramangala", "Bhoganahalli"])
+    elif memory.get("customer_part") == "South":
+        terms.extend(["Electronic City", "Hosur Road", "Bannerghatta", "Banashankari"])
     south_places = {"electronic city", "bannerghatta", "banashankari"}
     east_places = {"panathur", "whitefield", "sarjapur", "koramangala", "bhoganahalli"}
     south_question = bool(offered) and any(place.lower() in south_places for place in offered) and not any(

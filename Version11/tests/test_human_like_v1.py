@@ -537,6 +537,24 @@ def test_greeting_accepts_available_without_yes():
     assert CALLS == []
 
 
+def test_you_can_tell_me_now_leaves_the_greeting():
+    app_v3.conversation_memory["stage"] = "greeting"
+    spoken, _, stage = _turn("Yeah, you can tell me now.")
+    assert CALLS == []
+    assert stage == "qualify"
+    low = spoken.lower()
+    assert "part of bengaluru" in low
+    assert "good time" not in low
+    assert low.count("?") == 1
+    spoken, _, stage = _turn("I'm not sure like where I'm looking.")
+    assert CALLS == []
+    assert stage == "qualify"
+    low = spoken.lower()
+    assert "configuration" in low
+    assert "good time" not in low
+    assert low.count("?") == 1
+
+
 def test_greeting_still_closes_on_not_now():
     app_v3.conversation_memory["stage"] = "greeting"
     spoken, _, stage = _turn("Not now.")
@@ -545,36 +563,102 @@ def test_greeting_still_closes_on_not_now():
 
 
 def test_greeting_answers_a_hold_and_stays_open():
+    from local_call.server import call_log, payload_from, resume_after_hold
+
+    assert app_v3.is_a_hold("Uh, just one minute, hold on.")
+    assert app_v3.is_a_hold("Uh, please wait for a minute.")
+    assert not app_v3.is_a_hold("I can't wait to hear about it.")
+    question = "Is now a good time for a quick call?"
+    for speech in ("One minute.", "Please wait for a minute."):
+        app_v3.reset_memory()
+        CALLS.clear()
+        app_v3.conversation_memory.update({
+            "stage": "greeting",
+            "last_agent_question": question,
+        })
+        response = asyncio.run(app_v3.handle_speech(_Request(speech), SpeechResult=speech))
+        payload = payload_from(response)
+        spoken = _spoken(response.body.decode() if isinstance(response.body, bytes) else response.body)
+        assert app_v3.conversation_memory["stage"] == "greeting", speech
+        assert CALLS == [], speech
+        assert "i will wait" in spoken.lower()
+        assert "good time" not in spoken.lower()
+        assert "lovely day" not in spoken.lower()
+        assert payload["wait_seconds"] == 45
+        assert payload["follow_up"] == question
+        assert app_v3.conversation_memory["last_agent_question"] == question
+
+    app_v3.reset_memory()
+    CALLS.clear()
     app_v3.conversation_memory["stage"] = "greeting"
-    app_v3.conversation_memory["last_agent_question"] = "Is now a good time for a quick call?"
-    spoken, _, stage = _turn("One minute.")
-    assert stage == "greeting"
+    spoken, _, stage = _turn("No, you didn't want.")
+    assert stage == "closed"
     assert CALLS == []
-    assert "good time" in spoken.lower()
-    assert "sq" not in spoken.lower()
-    assert "lovely day" not in spoken.lower()
+    assert "lovely day" in spoken.lower()
+    assert "good time" not in spoken.lower()
+
+    call_log.begin()
+    app_v3.conversation_memory["question_after_hold"] = question
+    saved = resume_after_hold()
+    assert saved["reply"] == question
+    assert call_log.turns[-1]["reply"] == question
+    assert call_log.turns[-1]["customer"] is None
+    assert app_v3.conversation_memory["question_after_hold"] == ""
 
 
-def test_busy_or_call_later_closes_with_the_advisor():
-    for speech in ("No, I am busy. Can you call later?", "No, I am busy."):
+def test_busy_or_call_later_asks_once_for_a_time():
+    for speech in ("No, I am busy. Can you call later?", "No, I am busy.", "I'm busy, can you call me later?"):
         app_v3.reset_memory()
         CALLS.clear()
         app_v3.conversation_memory["stage"] = "greeting"
         spoken, _, stage = _turn(speech)
-        assert stage == "closed", speech
-        assert "sales advisor" in spoken.lower()
-        assert "have a good day" in spoken.lower()
-        assert "good time" not in spoken.lower()
+        assert stage == "greeting", speech
+        assert CALLS == [], speech
+        assert "what time should i call you back" in spoken.lower()
+        assert "sales advisor" not in spoken.lower()
+        assert spoken.lower().count("?") == 1
+        spoken, _, stage = _turn("Around 6 PM.")
+        assert stage == "closed"
         assert CALLS == []
+        assert "6 pm" in spoken.lower()
+        assert "sales advisor" not in spoken.lower()
+        assert "have a good day" in spoken.lower()
+        assert app_v3.conversation_memory["callback_when"] == "6 PM"
 
     app_v3.reset_memory()
     CALLS.clear()
     app_v3.conversation_memory["stage"] = "qualify"
-    spoken, _, stage = _turn("Can you call me later?")
+    spoken, _, stage = _turn("Call me tomorrow at 6 PM.")
     assert stage == "closed"
-    assert "sales advisor" in spoken.lower()
-    assert "have a good day" in spoken.lower()
     assert CALLS == []
+    assert "tomorrow at 6 pm" in spoken.lower()
+    assert "sales advisor" not in spoken.lower()
+    assert app_v3.conversation_memory["callback_when"] == "tomorrow at 6 PM"
+
+    app_v3.reset_memory()
+    CALLS.clear()
+    app_v3.conversation_memory.update({
+        "stage": "greeting",
+        "awaiting_callback_time": True,
+    })
+    spoken, _, stage = _turn("Anytime.")
+    assert stage == "closed"
+    assert CALLS == []
+    assert "call you back later" in spoken.lower()
+    assert "?" not in spoken
+    assert app_v3.conversation_memory["callback_when"] == "later"
+
+    app_v3.reset_memory()
+    CALLS.clear()
+    app_v3.conversation_memory.update({
+        "stage": "greeting",
+        "awaiting_callback_time": True,
+    })
+    spoken, _, stage = _turn("I can talk now.")
+    assert stage == "qualify"
+    assert CALLS == []
+    assert "part of bengaluru" in spoken.lower()
+    assert app_v3.conversation_memory["callback_when"] is None
 
 
 def test_qualification_answers_a_hold_or_a_question():
@@ -2001,7 +2085,7 @@ _VISIT = {
             {"last_agent_question": "Is now a good time for a quick call?"},
             "greeting",
             "good time",
-            "",
+            "model",
         ),
         (
             "greeting",
@@ -2009,7 +2093,7 @@ _VISIT = {
             {"last_agent_question": "Is now a good time for a quick call?"},
             "greeting",
             "good time",
-            "",
+            "model",
         ),
         ("qualify", "Sounds good.", _PURPOSE, "answer_faq", "location", "purpose-kept"),
         ("qualify", "No.", _PURPOSE, "answer_faq", "location", "purpose-declined"),
@@ -2038,7 +2122,10 @@ _VISIT = {
 def test_reply_kind_covers_each_stage(stage, speech, prepare, expect_stage, needle, marker):
     app_v3.conversation_memory.update({"stage": stage, **prepare})
     spoken, _, got = _turn(speech)
-    assert CALLS == []
+    if marker == "model":
+        assert CALLS
+    else:
+        assert CALLS == []
     assert got == expect_stage
     assert needle in spoken.lower()
     if marker == "purpose-open":
@@ -2195,6 +2282,120 @@ def test_a_yes_to_a_visit_names_the_locked_project():
     assert "ten a m" not in spoken.lower()
 
 
+def test_west_bengaluru_is_answered_and_not_stored_as_whitefield():
+    app_v3.reset_memory()
+    app_v3.conversation_memory.update({
+        "stage": "qualify",
+        "catalog_flow": True,
+        "part_asked": True,
+        "last_agent_question": "Which part of Bengaluru are you considering — North, East, or South?",
+        "last_spoken_reply": (
+            "Thanks for taking the call. Which part of Bengaluru are you considering "
+            "— North, East, or South?"
+        ),
+    })
+    heard = app_v3.correct_stt(
+        "Oh, is there any projects in West Bengal?",
+        stage="qualify",
+    )
+    assert heard == "Oh, is there any projects in West Bengaluru?"
+    assert app_v3.correct_stt("West Bengaluru.", stage="qualify") == "West Bengaluru."
+    spoken, _, stage = _turn("Oh, is there any projects in West Bengal?")
+    assert CALLS == []
+    assert stage == "qualify"
+    low = spoken.lower()
+    assert "there is no west bengaluru project" in low
+    assert "north, east, or south" in low
+    assert app_v3.conversation_memory["customer_place"] is None
+    assert app_v3.conversation_memory["customer_part"] is None
+    assert low.count("?") == 1
+
+
+def test_south_named_with_west_continues_to_configuration():
+    app_v3.reset_memory()
+    app_v3.conversation_memory.update({
+        "stage": "qualify",
+        "catalog_flow": True,
+        "part_asked": True,
+        "last_agent_question": "Which part of Bengaluru are you considering — North, East, or South?",
+    })
+    spoken, _, stage = _turn(
+        "I'm considering South or West Bengaluru. Are there any projects in West Bengaluru?"
+    )
+    assert CALLS == []
+    assert stage == "qualify"
+    low = spoken.lower()
+    assert "there is no west bengaluru project" in low
+    assert "south bengaluru" in low
+    assert "configuration" in low
+    assert "which part of bengaluru" not in low
+    assert app_v3.conversation_memory["customer_part"] == "South"
+    assert app_v3.conversation_memory["customer_place"] is None
+    assert low.count("?") == 1
+
+
+def test_a_greeting_question_is_answered_before_the_permission_question():
+    speech = "May I know who is this?"
+    REPLIES[speech] = (
+        "I am calling from Sobha Limited regarding our residential projects in Bengaluru. "
+        "It is not confirmed how this number was obtained."
+    )
+    app_v3.conversation_memory.update({
+        "stage": "greeting",
+        "last_agent_question": "Is now a good time for a quick call?",
+    })
+    try:
+        spoken, _, stage = _turn(speech)
+    finally:
+        REPLIES.pop(speech, None)
+    assert stage == "greeting"
+    assert CALLS
+    system = CALLS[-1]["json"]["messages"][0]["content"].lower()
+    assert "do not ask a question." in system
+    assert "do not name a price." in system
+    assert "number" not in system
+    low = spoken.lower()
+    assert "good time" in low
+    assert "sobha limited" in low
+    assert "number" not in low
+    assert "obtained" not in low
+    assert "not confirmed" not in low
+    assert low.count("?") == 1
+
+
+def test_a_number_question_says_the_detail_is_unavailable():
+    app_v3.conversation_memory.update({
+        "stage": "greeting",
+        "last_agent_question": "Is now a good time for a quick call?",
+    })
+    spoken, _, stage = _turn("How did you get my number?")
+    assert stage == "greeting"
+    assert CALLS
+    system = CALLS[-1]["json"]["messages"][0]["content"]
+    assert "not available" in system
+    low = spoken.lower()
+    assert "good time" in low
+    assert "how this number was selected is not available" in low
+    assert low.count("?") == 1
+
+
+def test_an_unmatched_question_keeps_the_open_catalog_step():
+    app_v3.conversation_memory.update({
+        "stage": "qualify",
+        "catalog_flow": True,
+        "part_asked": True,
+        "last_agent_question": "Which part of Bengaluru are you considering — North, East, or South?",
+    })
+    spoken, _, stage = _turn("May I know who is this? Why are you calling?")
+    assert CALLS
+    assert stage == "qualify"
+    assert app_v3.conversation_memory["customer_part"] is None
+    assert app_v3.conversation_memory["customer_place"] is None
+    low = spoken.lower()
+    assert "north, east, or south" in low
+    assert low.count("?") == 1
+
+
 def test_east_bengaluru_is_kept_and_then_asks_the_places():
     app_v3.conversation_memory.update({
         "stage": "qualify",
@@ -2218,6 +2419,30 @@ def test_east_bengaluru_is_kept_and_then_asks_the_places():
     assert "townpark" not in spoken.lower()
     assert "1.65" not in spoken.lower()
     assert "two projects fit" not in spoken.lower()
+
+
+def test_an_investment_answer_names_the_two_bedroom_match():
+    app_v3.conversation_memory.update({
+        "stage": "qualify",
+        "catalog_flow": True,
+        "part_asked": True,
+        "customer_part": "East",
+        "config_prompted": True,
+        "customer_bedrooms": 2,
+        "customer_configuration": "2 BHK",
+        "purpose_prompted": True,
+        "last_agent_question": "Are you looking at this to live in, or as an investment?",
+    })
+    spoken, _, stage = _turn("I am looking for investment.")
+    assert CALLS == []
+    assert stage == "qualify"
+    low = spoken.lower()
+    assert "looking at this as an investment" in low
+    assert "one world" in low
+    assert "2 bhk" in low
+    assert "whitefield" in low
+    assert "1.8 crore" in low
+    assert spoken.count("?") == 1
 
 
 def test_covering_both_names_each_location_and_where_stays_on_the_cards():

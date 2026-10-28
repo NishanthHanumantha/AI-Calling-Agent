@@ -22,6 +22,7 @@ class CallLog:
         self.call_id = _now()
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.turns: list[dict[str, Any]] = []
+        self.callback_when: str | None = None
         self._pending_stt: dict[str, Any] | None = None
         self._awaiting_speech: dict[str, Any] | None = None
         self.saved = False
@@ -67,6 +68,7 @@ class CallLog:
             "started_at": self.started_at,
             "caller_model": CALLER_MODEL,
             "turns": self.turns,
+            **({"callback_when": self.callback_when} if self.callback_when else {}),
         }
 
     def save(self, runs_dir: Path) -> Path:

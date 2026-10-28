@@ -208,6 +208,7 @@ def render_scorecard(
         f"| Caller | {record.get('caller_model')} |",
         f"| Judge | {judged.get('model') or 'unavailable'} |",
         f"| Result | {tally or '—'} |",
+        *([f"| Call back | {record.get('callback_when')} |"] if record.get("callback_when") else []),
         "",
         "## What to change",
         "",

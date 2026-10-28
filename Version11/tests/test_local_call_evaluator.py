@@ -984,6 +984,47 @@ def test_an_echo_of_the_spoken_line_is_not_a_turn(monkeypatch):
     assert app_v3.customer_language() == "en-IN"
 
 
+def test_a_single_part_answer_is_not_an_echo_of_the_area_question():
+    from local_call.server import mostly_echo
+
+    question = (
+        "Thanks for taking the call. Which part of Bengaluru are you considering "
+        "— North, East, or South?"
+    )
+    assert mostly_echo("I'm considering North Bengaluru.", question) is False
+    assert mostly_echo(
+        "Which part of Bengaluru are you considering, North, East, or South?",
+        question,
+    ) is True
+    page = Path(__file__).resolve().parents[1].joinpath("local_call", "index.html").read_text(encoding="utf-8")
+    echo = page[page.index("function isEcho"):page.index("function levelOf")]
+    assert "namedParts(transcript).length === 1" in echo
+    assert echo.index("length === 1") < echo.index("0.6")
+
+
+def test_a_single_place_answer_is_not_an_echo_of_the_locality_question():
+    from local_call.server import mostly_echo
+
+    question = (
+        "Got it. You're looking at this as an investment. Okay, that's good. "
+        "Are you looking closer to Whitefield, Panathur, Sarjapur, Koramangala, or Bhoganahalli?"
+    )
+    assert mostly_echo("I'm looking closer to Panathur.", question) is False
+    assert mostly_echo(
+        "Are you looking closer to Whitefield, Panathur, Sarjapur, Koramangala, or Bhoganahalli?",
+        question,
+    ) is True
+    offer = (
+        "We have SOBHA One World, near Whitefield, whose price starts from INR 1.8 Crore. "
+        "Would you be interested to know about the project?"
+    )
+    assert mostly_echo("near Whitefield.", offer) is True
+    page = Path(__file__).resolve().parents[1].joinpath("local_call", "index.html").read_text(encoding="utf-8")
+    echo = page[page.index("function isEcho"):page.index("function levelOf")]
+    assert "namedPlaces(transcript)" in echo
+    assert "offered.length > 1" in echo
+
+
 def test_a_short_english_detection_stays_in_the_chosen_language():
     import app_v3
 
@@ -1036,8 +1077,9 @@ def test_a_hindi_bulbul_miss_uses_neerja_without_a_second_bulbul(monkeypatch):
     import asyncio
 
     import app_v3
-    from local_call.server import Turn, speak_reply
+    from local_call.server import Turn, clear_translations, speak_reply
 
+    clear_translations()
     app_v3.reset_memory()
     app_v3.note_detected_language("hi-IN")
     posted = []
@@ -1108,6 +1150,105 @@ def test_a_bulbul_connection_error_uses_neerja_once(monkeypatch):
     assert posted[1]["language_code"] == "en-IN"
     assert "Bengaluru" in posted[2]["text"]
     assert app_v3.customer_language() == "kn-IN"
+
+
+def test_a_cached_clause_is_not_translated_again(monkeypatch):
+    import asyncio
+
+    import app_v3
+    from local_call.server import Turn, clear_translations, speak_reply, translate_text
+
+    clear_translations()
+    app_v3.reset_memory()
+    app_v3.note_detected_language("hi-IN")
+    posts = []
+
+    class _Reply:
+        status_code = 200
+
+        def __init__(self, kind):
+            self.kind = kind
+
+        def json(self):
+            if self.kind == "translate":
+                return {"translated_text": "नमस्ते"}
+            return {"audios": ["UklGRg=="]}
+
+    def post(url, *args, **kwargs):
+        kind = "translate" if "translate" in url else "bulbul"
+        posts.append(kind)
+        return _Reply(kind)
+
+    monkeypatch.setattr("local_call.server.requests.post", post)
+    monkeypatch.setattr("local_call.server.app_v3.SARVAM_API_KEY", "test")
+    assert translate_text("Got it.", "hi-IN") == "नमस्ते"
+    assert translate_text("Got it.", "hi-IN") == "नमस्ते"
+    assert posts == ["translate"]
+    response = asyncio.run(speak_reply(Turn(text="Got it.")))
+    assert response.status_code == 200
+    assert posts == ["translate", "bulbul"]
+    assert response.headers["x-audio-format"] == "wav"
+
+
+def test_the_greeting_prepares_the_qualification_lines_first(monkeypatch):
+    import app_v3
+    from local_call.server import prepare_upcoming
+
+    app_v3.reset_memory()
+    seen = []
+    monkeypatch.setattr(
+        "local_call.server._enqueue",
+        lambda clause, language: seen.append((language, clause)),
+    )
+    prepare_upcoming("Hi, this is Sobha Limited calling.")
+    hindi = [clause for language, clause in seen if language == "hi-IN"]
+    area = next(index for index, clause in enumerate(hindi) if "which part of bengaluru" in clause.lower())
+    configuration = next(index for index, clause in enumerate(hindi) if "configuration" in clause.lower())
+    purpose = next(index for index, clause in enumerate(hindi) if "live in" in clause.lower())
+    assert area < configuration < purpose
+    assert {language for language, _clause in seen} == set(app_v3.SPOKEN_LANGUAGES)
+    joined = " ".join(hindi).lower()
+    assert "as an investment" in joined
+    assert "your own use" in joined
+    assert "interested to know about the project" in joined
+    assert "sales advisor" in joined
+
+
+def test_a_locked_language_prepares_only_that_languages_next_line(monkeypatch):
+    import app_v3
+    from local_call.server import prepare_upcoming
+
+    app_v3.reset_memory()
+    app_v3.note_detected_language("kn-IN")
+    app_v3.conversation_memory.update({
+        "customer_part": "East",
+        "customer_bedrooms": 2,
+        "part_asked": True,
+        "config_prompted": True,
+    })
+    project = app_v3.catalog.BY_ID["sobha-one-world"]
+    seen = []
+    monkeypatch.setattr(
+        "local_call.server._enqueue",
+        lambda clause, language: seen.append((language, clause)),
+    )
+    prepare_upcoming("Are you looking at this to live in, or as an investment?")
+    assert seen
+    assert {language for language, _clause in seen} == {"kn-IN"}
+    joined = " ".join(clause for _language, clause in seen).lower()
+    assert "one world" in joined
+    assert "1.8 crore" in joined
+    app_v3.conversation_memory["pending_project_ids"] = [project["id"]]
+    seen.clear()
+    prepare_upcoming(
+        "We have SOBHA One World, near Whitefield, with 2 BHK residences, "
+        "whose price starts from INR 1.8 Crore. "
+        "Would you be interested to know about the project?"
+    )
+    overview = " ".join(clause for _language, clause in seen).lower()
+    assert {language for language, _clause in seen} == {"kn-IN"}
+    assert "one world" in overview
+    assert project["theme"].split()[0].lower() in overview
 
 
 def test_bulbul_speaks_a_wav_the_page_can_decode(monkeypatch):
@@ -1231,6 +1372,41 @@ def test_a_failed_greeting_is_decoded_as_wav_and_does_not_listen():
     assert started < heard < kept < barge
 
 
+def test_speech_during_the_greeting_is_sent_without_stopping_it():
+    page = Path(__file__).resolve().parents[1].joinpath("local_call", "index.html").read_text(encoding="utf-8")
+    started = page.index("source.start()")
+    heard = page.index("greetingAudible = true")
+    kept = page.index("callHeard = true")
+    barge = page.index("if (bargeInReady) armBargeIn(session);")
+    alongside = page.index("else armGreetingListen();")
+    assert started < heard < kept < barge < alongside
+    opener = page[page.index("async function armGreetingListen"):page.index("async function listen")]
+    assert 'openCapture("greeting")' in opener
+    assert "pause(" not in opener
+    processor = page[page.index("processor.onaudioprocess"):page.index("source.connect(processor)")]
+    greeting = processor[processor.index('capture.phase === "greeting"'):processor.index("const opened = noteRoom")]
+    assert "speechNeeded" in greeting
+    assert "speechHeld" in greeting
+    assert "pause(" not in greeting
+    agent = page[page.index("async function agentTurn"):page.index("async function endCall")]
+    phase = agent.index('capture.phase === "greeting"')
+    sent = agent.index("sendAudio(blob)")
+    fresh = agent.rindex("listen();")
+    assert phase < sent < fresh
+    assert "Math.round(0.45 / frameSeconds)" in page
+
+
+def test_a_hold_stays_quiet_before_the_open_question():
+    page = Path(__file__).resolve().parents[1].joinpath("local_call", "index.html").read_text(encoding="utf-8")
+    agent = page[page.index("async function agentTurn"):page.index("async function endCall")]
+    quiet = agent.index("await holdQuiet(data.wait_seconds)")
+    spoke = agent.index("if (!active || spoke) return;")
+    asked = agent.index('fetch("/local/resume"')
+    assert quiet < spoke < asked
+    assert "holdQuietDone" in page
+    assert "Math.round(0.45 / frameSeconds)" in page
+
+
 def test_an_east_place_question_boosts_panathur_not_townpark():
     import app_v3
     from local_call.server import stt_keyterms
@@ -1252,3 +1428,38 @@ def test_an_east_place_question_boosts_panathur_not_townpark():
 
     app_v3.conversation_memory.update({"customer_part": "South", "active_project_ids": ["sobha-townpark"]})
     assert "Townpark" in stt_keyterms()
+
+
+def test_the_part_question_boosts_west_bengaluru_not_whitefield():
+    import app_v3
+    from local_call.server import stt_keyterms
+
+    app_v3.reset_memory()
+    app_v3.conversation_memory["last_agent_question"] = (
+        "Which part of Bengaluru are you considering — North, East, or South?"
+    )
+    terms = stt_keyterms()
+    for name in ("Bengaluru", "Bangalore", "North", "East", "South", "West"):
+        assert name in terms
+    assert "Whitefield" not in terms
+    assert "Electronic City" not in terms
+    assert "Hosur Road" not in terms
+
+    app_v3.conversation_memory.update({
+        "customer_part": "East",
+        "last_agent_question": "May I know which configuration you are interested in?",
+    })
+    east_terms = stt_keyterms()
+    assert "Whitefield" in east_terms
+    assert "Panathur" in east_terms
+    assert "Electronic City" not in east_terms
+    assert "Hosur Road" not in east_terms
+
+    app_v3.conversation_memory.update({
+        "customer_part": "South",
+        "last_agent_question": "May I know which configuration you are interested in?",
+    })
+    south_terms = stt_keyterms()
+    assert "Electronic City" in south_terms
+    assert "Hosur Road" in south_terms
+    assert "Whitefield" not in south_terms

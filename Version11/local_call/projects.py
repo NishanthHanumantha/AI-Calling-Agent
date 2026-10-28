@@ -441,13 +441,39 @@ def _lowest(projects, count):
 _INTEREST = "Would you be interested to know about the project?"
 
 
-def _one_project_offer(project):
+def _bedroom_phrase(project, bedrooms):
+    """The bedroom count the customer named, when this project has it."""
+    if bedrooms is None:
+        return ""
+    try:
+        wanted = float(bedrooms)
+    except (TypeError, ValueError):
+        return ""
+    beds = project.get("bedrooms") or ()
+    if not any(float(item) == wanted for item in beds):
+        return ""
+    shown = str(int(wanted)) if wanted == int(wanted) else str(wanted)
+    return f"{shown} BHK residences"
+
+
+def _one_project_offer(project, bedrooms=None):
     """A spoken introduction for the one project that matches."""
     where = project["place"] or project["location"]
+    home = _bedroom_phrase(project, bedrooms)
     if project["price_known"]:
+        if home:
+            return (
+                f"We have {project['spoken']}, near {where}, with {home}, "
+                f"whose price starts from {project['price_spoken']}. {_INTEREST}"
+            )
         return (
             f"We have {project['spoken']}, near {where}, "
             f"whose price starts from {project['price_spoken']}. {_INTEREST}"
+        )
+    if home:
+        return (
+            f"We have {project['spoken']}, near {where}, with {home}. "
+            f"The price will be discussed by our sales advisor. {_INTEREST}"
         )
     return (
         f"We have {project['spoken']}, near {where}. "
@@ -455,7 +481,7 @@ def _one_project_offer(project):
     )
 
 
-def suggestion(projects, ceiling=None, strict=False, closest=False):
+def suggestion(projects, ceiling=None, strict=False, closest=False, bedrooms=None):
     """The spoken shortlist. A long list keeps the two lowest starting prices."""
     if ceiling is not None and strict and ceiling <= 1 and not closest:
         plots = [project for project in projects if project["home_type"] == "plot"]
@@ -466,7 +492,7 @@ def suggestion(projects, ceiling=None, strict=False, closest=False):
                 f"starting from {project['price_spoken']}. {_INTEREST}"
             )
     if len(projects) == 1 and not closest:
-        return _one_project_offer(projects[0])
+        return _one_project_offer(projects[0], bedrooms)
     if len(projects) == 2 and not closest:
         first, second = projects
         return (

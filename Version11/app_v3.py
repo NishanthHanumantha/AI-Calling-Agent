@@ -113,6 +113,9 @@ conversation_memory = {
     "payment_stated": False,
     "open_project_asked": False,
     "awaiting_callback": False,
+    "awaiting_callback_time": False,
+    "callback_when": None,
+    "question_after_hold": "",
     "catalog_flow": False,
     "catalog_done": False,
     "part_asked": False,
@@ -361,6 +364,8 @@ def correct_stt(user_text, stage=None):
         normalized = normalized.replace("granded", "grande")
 
     last_question = (conversation_memory.get("last_agent_question") or "").lower()
+    original = _restore_west_bengaluru(original)
+    normalized = re.sub(r"\s+", " ", original.lower()).strip()
     if is_bare_configuration_word(original):
         return original
     if re.match(r"^(configuration|configurations)\.?$", normalized) and re.search(
@@ -405,6 +410,32 @@ def correct_stt(user_text, stage=None):
                     return f"tell me about {topic}"
 
     return original
+
+
+def _restore_west_bengaluru(text):
+    """'West Bengal' in this Bengaluru call is West Bengaluru with the ending dropped."""
+    about = " ".join((
+        conversation_memory.get("last_agent_question") or "",
+        conversation_memory.get("last_spoken_reply") or "",
+    )).lower()
+    if (
+        "bengaluru" not in about
+        and "bangalore" not in about
+        and not conversation_memory.get("catalog_flow")
+    ):
+        return text
+    return re.sub(r"(?i)\bwest bengal\b", "West Bengaluru", text)
+
+
+def _names_west_bengaluru(text):
+    """The customer named West, which is not one of the three Bengaluru parts."""
+    low = (text or "").lower()
+    if re.search(r"\bwest(?:ern)?\s+bengal", low):
+        return True
+    last = (conversation_memory.get("last_agent_question") or "").lower()
+    if "part of bengaluru" in last or "which part" in last:
+        return re.search(r"\bwest(?:ern)?\b", low) is not None
+    return False
 
 
 def say_block(text, escape_content=True):
@@ -1174,6 +1205,19 @@ def available_to_talk(text):
     return any(phrase in text_lower for phrase in phrases)
 
 
+def agrees_to_talk_now(text):
+    """A greeting yes such as 'you can tell me now'. A later 'tell me about the price' is not one."""
+    low = (text or "").lower()
+    if is_a_hold(low) or asks_to_call_later(low) or is_clear_negative(low):
+        return False
+    if re.search(r"\b(?:tell me now|you can tell me)\b", low):
+        return True
+    return (
+        re.search(r"\b(?:yes|yeah|yep|yup|sure|ok|okay)\b", low) is not None
+        and re.search(r"\bnow\b", low) is not None
+    )
+
+
 def asks_to_call_later(text):
     """The customer cannot continue this call. A short hold is not a callback."""
     low = (text or "").lower()
@@ -1187,6 +1231,77 @@ def asks_to_call_later(text):
         r"|\b(?:can(?:not|'t)|can not)\s+(?:talk|speak)\b",
         low,
     ) is not None
+
+
+def _tidy_clock(raw):
+    match = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)", raw or "", re.I)
+    if not match:
+        return ""
+    hour, minute, meridiem = match.group(1), match.group(2), match.group(3)
+    suffix = "AM" if meridiem.lower().startswith("a") else "PM"
+    if minute:
+        return f"{hour}:{minute} {suffix}"
+    return f"{hour} {suffix}"
+
+
+def callback_time_named(text):
+    """A clock time or a part of the day. Later and sometime are not a time."""
+    low = (text or "").lower()
+    clock = re.search(r"\b(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?))\b", low)
+    daypart = re.search(r"\b(morning|afternoon|evening|tonight)\b", low)
+    tomorrow = re.search(r"\btomorrow\b", low) is not None
+    relative = re.search(r"\bin\s+(?:an?\s+)?(?:\d+\s+)?(?:hours?|minutes?)\b", low)
+    clock_text = _tidy_clock(clock.group(1)) if clock else ""
+    part = daypart.group(1) if daypart else ""
+    if tomorrow and clock_text:
+        return f"tomorrow at {clock_text}"
+    if tomorrow and part:
+        return f"tomorrow {part}"
+    if tomorrow:
+        return "tomorrow"
+    if clock_text:
+        return clock_text
+    if part:
+        return part
+    if relative:
+        return re.sub(r"\s+", " ", relative.group(0)).strip()
+    return ""
+
+
+def wants_a_callback(text):
+    """Busy, call later, or call me at a named time."""
+    if asks_to_call_later(text):
+        return True
+    return bool(callback_time_named(text) and re.search(r"\bcall(?:\s+me)?\b", text or "", re.I))
+
+
+def _callback_phrase(when):
+    if when in {"morning", "afternoon", "evening"}:
+        return f"in the {when}"
+    if when in {"tonight", "tomorrow", "later"} or when.startswith(("tomorrow ", "in ")):
+        return when
+    return f"at {when}"
+
+
+def confirm_callback(when):
+    """Agree the time and end the call. This does not dial."""
+    conversation_memory["callback_when"] = when
+    conversation_memory["awaiting_callback_time"] = False
+    conversation_memory["stage"] = "closed"
+    line = f"Sure, I will call you back {_callback_phrase(when)}. Have a good day."
+    return Response(content=polite_exit_twiml(line), media_type="application/xml")
+
+
+def ask_or_confirm_callback(user_text):
+    """Ask once for a time, or confirm a time already spoken."""
+    when = callback_time_named(user_text)
+    if when:
+        return confirm_callback(when)
+    conversation_memory["awaiting_callback_time"] = True
+    return Response(
+        content=qualification_twiml("Sure. What time should I call you back?"),
+        media_type="application/xml",
+    )
 
 
 def wants_site_visit(text):
@@ -1223,10 +1338,17 @@ def asks_about_the_visit(text):
 def is_a_hold(text):
     """The customer is pausing. This is not an answer to the last question."""
     return re.search(
-        r"\b(one minute|just a minute|hold on)\b",
+        r"\b(?:please wait|wait for|one minute|just a minute|a minute|hold on)\b",
         text or "",
         re.I,
     ) is not None
+
+
+def greeting_starts_with_no(text):
+    """A leading no to the greeting. A who or why question is not one."""
+    if re.search(r"\b(?:who|why|what|how)\b", text or "", re.I):
+        return False
+    return re.match(r"\s*(?:no|nope|nah)\b", text or "", re.I) is not None
 
 
 def is_new_faq_question(text):
@@ -2901,11 +3023,23 @@ def qualification_twiml(question):
     return f"<Response>{gather_block(question)}</Response>"
 
 
+def hold_twiml():
+    """Say the agent will wait. The open question is asked only after the quiet."""
+    conversation_memory["question_after_hold"] = conversation_memory.get("last_agent_question") or ""
+    response = Response(
+        content=qualification_twiml("Sure, I will wait."),
+        media_type="application/xml",
+    )
+    if conversation_memory.get("question_after_hold"):
+        conversation_memory["last_agent_question"] = conversation_memory["question_after_hold"]
+    return response
+
+
 def wait_response(user_text):
     """A pause keeps the call open and does not repeat the last question."""
     if not is_a_hold(user_text):
         return None
-    return Response(content=qualification_twiml("I will wait."), media_type="application/xml")
+    return hold_twiml()
 
 
 def time_to_decide_twiml():
@@ -2962,6 +3096,9 @@ def reset_memory():
     conversation_memory["payment_stated"] = False
     conversation_memory["open_project_asked"] = False
     conversation_memory["awaiting_callback"] = False
+    conversation_memory["awaiting_callback_time"] = False
+    conversation_memory["callback_when"] = None
+    conversation_memory["question_after_hold"] = ""
     conversation_memory["catalog_flow"] = False
     conversation_memory["catalog_done"] = False
     conversation_memory["part_asked"] = False
@@ -3013,12 +3150,15 @@ def answer_in_place(user_text):
 
 
 def answer_then_ask(user_text, question):
-    """Answer what was said, then ask the stage question again."""
+    """Answer an unmatched reply, then ask the open script question again."""
+    answer = unmatched_model_answer(user_text)
+    if not answer:
+        return Response(content=qualification_twiml(question), media_type="application/xml")
     return Response(
         content=f"""
 <Response>
 
-{say_block(grounded_reply(user_text))}
+{say_block(answer)}
 
 <Pause length="1"/>
 
@@ -3028,6 +3168,164 @@ def answer_then_ask(user_text, question):
 """,
         media_type="application/xml",
     )
+
+
+def _asks_how_the_number_was_obtained(text):
+    low = (text or "").lower()
+    return (
+        re.search(r"\b(number|phone)\b", low) is not None
+        and re.search(r"\b(how|where|who)\b", low) is not None
+    )
+
+
+def _mentions_how_the_number_was_obtained(sentence):
+    low = (sentence or "").lower()
+    return (
+        re.search(r"\b(number|phone)\b", low) is not None
+        and re.search(
+            r"\b(obtained|selected|source|confirmed|get|got|gave|given)\b",
+            low,
+        )
+        is not None
+    )
+
+
+def _script_owns(user_text):
+    """A recognized catalog answer stays on the script."""
+    if (
+        is_positive(user_text)
+        or is_clear_negative(user_text)
+        or available_to_talk(user_text)
+        or asks_to_call_later(user_text)
+    ):
+        return True
+    if (
+        catalog.part_of_city(user_text)
+        or catalog.place_named(user_text)
+        or catalog.project_named_in(user_text)
+        or catalog.outside_project_named(user_text)
+        or catalog.undecided(user_text)
+        or catalog.wants_a_plot(user_text)
+        or _names_west_bengaluru(user_text)
+    ):
+        return True
+    if extract_configuration(user_text) or is_bare_configuration_word(user_text):
+        return True
+    if is_purpose_statement(user_text) or _skips_catalog_question(user_text):
+        return True
+    return catalog.budget_ceiling(user_text)[0] is not None
+
+
+def _repeats_the_open_question(reply):
+    last = (conversation_memory.get("last_agent_question") or "").strip()
+    return bool(last) and isinstance(reply, str) and reply.strip() == last
+
+
+def _catalog_or_model(user_text):
+    """Use the catalog reply. A pure repeat of an unmatched line goes to the model."""
+    saved = {
+        key: conversation_memory.get(key)
+        for key in (
+            "customer_part",
+            "customer_place",
+            "customer_configuration",
+            "customer_bedrooms",
+            "customer_purpose",
+        )
+    }
+    reply = catalog_reply(user_text)
+    if _repeats_the_open_question(reply) and not _script_owns(user_text):
+        conversation_memory.update(saved)
+        return answer_then_ask(user_text, conversation_memory.get("last_agent_question"))
+    return route_known(reply)
+
+
+def unmatched_model_answer(user_text):
+    """One or two sentences for a reply the script does not handle."""
+    if not SARVAM_API_KEY or not (user_text or "").strip():
+        return ""
+    selected = [
+        catalog.BY_ID[item]["spoken"]
+        for item in (conversation_memory.get("active_project_ids") or [])
+        if item in catalog.BY_ID
+    ]
+    allowed = ", ".join(selected) if selected else "none yet"
+    number_line = ""
+    if _asks_how_the_number_was_obtained(user_text):
+        number_line = (
+            "They asked how this phone number was obtained. "
+            "Say that detail is not available. Do not guess a source. "
+        )
+    system_prompt = (
+        "You are on a phone call for Sobha Limited about residential projects in Bengaluru. "
+        "Answer only the customer's latest point in one or two short spoken sentences. "
+        "Do not ask a question. "
+        "Do not name a price. "
+        f"Do not name a project. Projects already selected: {allowed}. "
+        f"{number_line}"
+        "Reply with only the words you will speak."
+    )
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Customer said: {user_text}"},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 120,
+    }
+    try:
+        response = requests.post(
+            SARVAM_URL,
+            headers={
+                "Authorization": f"Bearer {SARVAM_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        response.raise_for_status()
+        raw = response.json()["choices"][0]["message"]["content"]
+    except Exception:
+        return ""
+    return _limit_unmatched_answer(user_text, clean_response(raw) or "")
+
+
+def _limit_unmatched_answer(user_text, text):
+    selected = {
+        catalog.BY_ID[item]["spoken"].lower()
+        for item in (conversation_memory.get("active_project_ids") or [])
+        if item in catalog.BY_ID
+    }
+    kept = []
+    for sentence in split_sentences(text):
+        low = sentence.lower()
+        if "?" in sentence:
+            continue
+        if re.search(r"\b(crore|lakh|inr|rs\.?)\b|₹", low):
+            continue
+        if any(
+            project["spoken"].lower() in low and project["spoken"].lower() not in selected
+            for project in catalog.PROJECTS
+        ):
+            continue
+        if re.search(
+            r"\b(website|portal|database|campaign|google|facebook|broker)\b",
+            low,
+        ):
+            continue
+        if (
+            not _asks_how_the_number_was_obtained(user_text)
+            and _mentions_how_the_number_was_obtained(sentence)
+        ):
+            continue
+        kept.append(sentence.strip())
+    if _asks_how_the_number_was_obtained(user_text) and not any(
+        re.search(r"not available|not confirmed|do not have|don't have", sentence, re.I)
+        for sentence in kept
+    ):
+        kept.append("How this number was selected is not available.")
+    return " ".join(kept[:2]).strip()
 
 
 def answer_faq_and_prompt(user_text, nudge_visit=False):
@@ -3505,6 +3803,41 @@ def _budget_limit(ceiling, strict):
     return f"within {amount}"
 
 
+def _stated_bedrooms():
+    """A bedroom count the customer named. A skipped configuration adds nothing."""
+    if conversation_memory.get("configuration_skipped"):
+        return None
+    return conversation_memory.get("customer_bedrooms")
+
+
+def _just_answered_purpose(user_text):
+    """This turn answered the purpose question. The purpose was not stored yet."""
+    if conversation_memory.get("customer_purpose") or conversation_memory.get("purpose_skipped"):
+        return False
+    last = (conversation_memory.get("last_agent_question") or "").lower()
+    if "live in" not in last and "investment" not in last:
+        return False
+    return is_purpose_statement(user_text)
+
+
+def _purpose_acknowledgement():
+    """The same lead reply_for_purpose speaks, without a price or a stage change."""
+    if conversation_memory.get("customer_purpose") == "live":
+        return "Got it. You're looking at this for your own use."
+    if conversation_memory.get("customer_purpose") == "investment":
+        return "Got it. You're looking at this as an investment."
+    return ""
+
+
+def _with_purpose_lead(reply, answering):
+    if not answering or not isinstance(reply, str) or reply == "ADVISOR":
+        return reply
+    lead = _purpose_acknowledgement()
+    if not lead:
+        return reply
+    return f"{lead} {reply}"
+
+
 def _suggest_catalog():
     matches = _current_matches()
     ceiling = conversation_memory.get("price_ceiling")
@@ -3542,7 +3875,7 @@ def _suggest_catalog():
     ):
         conversation_memory["narrow_asked"] = True
         conversation_memory["pending_project_ids"] = [project["id"] for project in listed]
-        return catalog.suggestion(listed)
+        return catalog.suggestion(listed, bedrooms=_stated_bedrooms())
     closest = len(matches) > 2
     shown = matches
     if closest:
@@ -3554,7 +3887,13 @@ def _suggest_catalog():
         return "ADVISOR"
     conversation_memory["pending_project_ids"] = [project["id"] for project in shown]
     conversation_memory["awaiting_suggestion"] = True
-    return catalog.suggestion(matches, ceiling=ceiling, strict=strict, closest=closest)
+    return catalog.suggestion(
+        matches,
+        ceiling=ceiling,
+        strict=strict,
+        closest=closest,
+        bedrooms=_stated_bedrooms(),
+    )
 
 
 SPOKEN_LANGUAGES = ("hi-IN", "kn-IN", "ta-IN", "te-IN", "ml-IN")
@@ -3791,7 +4130,7 @@ def _switch_to_named_place(user_text):
     conversation_memory["pending_project_ids"] = [project["id"] for project in matches]
     conversation_memory["awaiting_suggestion"] = True
     conversation_memory["stage"] = "qualify"
-    return catalog.suggestion(matches)
+    return catalog.suggestion(matches, bedrooms=_stated_bedrooms())
 
 
 def _asks_where(text):
@@ -3850,7 +4189,7 @@ def _reply_for_other_projects(offered):
     conversation_memory["active_project_ids"] = []
     conversation_memory["catalog_done"] = False
     conversation_memory["stage"] = "qualify"
-    return f"{lead} {catalog.suggestion(others, closest=closest)}"
+    return f"{lead} {catalog.suggestion(others, closest=closest, bedrooms=_stated_bedrooms())}"
 
 
 def _offered_pair(user_text, pending, named):
@@ -4003,6 +4342,20 @@ def catalog_reply(user_text):
         ]
     if catalog.outside_project_named(user_text) and not named:
         return "ADVISOR"
+    answering_purpose = _just_answered_purpose(user_text)
+
+    def spoken(reply):
+        return _with_purpose_lead(reply, answering_purpose)
+
+    if _names_west_bengaluru(user_text):
+        part = catalog.part_of_city(user_text)
+        if part:
+            conversation_memory["customer_part"] = part
+            question = _next_catalog_question()
+            if question:
+                return f"There is no West Bengaluru project. For {part} Bengaluru, {question}"
+        return f"There is no West Bengaluru project. {catalog.AREA_QUESTION}"
+
     _absorb_catalog(user_text)
     if (
         offered
@@ -4017,22 +4370,22 @@ def catalog_reply(user_text):
         if not conversation_memory.get("customer_purpose") and not conversation_memory.get("purpose_skipped"):
             conversation_memory["catalog_done"] = False
             conversation_memory["purpose_prompted"] = True
-            return f"{line} {catalog.PURPOSE_QUESTION}"
+            return spoken(f"{line} {catalog.PURPOSE_QUESTION}")
         if not conversation_memory.get("price_stated"):
-            return f"{line} {price_statement()}"
-        return line
+            return spoken(f"{line} {price_statement()}")
+        return spoken(line)
     if _part_answer_missing():
-        return catalog.AREA_QUESTION
+        return spoken(catalog.AREA_QUESTION)
     if conversation_memory.get("active_project_ids") and conversation_memory.get("purpose_prompted"):
         conversation_memory["catalog_done"] = True
         return None
     ceiling = conversation_memory.get("price_ceiling")
     if ceiling is not None and conversation_memory.get("price_strict") and ceiling <= 1:
-        return _suggest_catalog()
+        return spoken(_suggest_catalog())
     question = _next_catalog_question()
     if question:
-        return question
-    return _suggest_catalog()
+        return spoken(question)
+    return spoken(_suggest_catalog())
 
 
 def budget_suggestion(user_text):
@@ -4181,7 +4534,9 @@ def close_or_offer_the_visit():
 
 def polite_stop(user_text):
     """Close when the customer is done with the project, the visit, or any details."""
-    if declines_the_project(user_text) or refuses_details(user_text) or asks_to_call_later(user_text):
+    if wants_a_callback(user_text):
+        return ask_or_confirm_callback(user_text)
+    if declines_the_project(user_text) or refuses_details(user_text):
         return advisor_followup_twiml()
     on_visit = conversation_memory.get("stage") in (
         "propose_slot", "visit_day", "visit_pick_slot",
@@ -4246,12 +4601,21 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
     print("CUSTOMER SAID (corrected):", user_text)
     print("MEMORY:", conversation_memory)
 
+    conversation_memory["question_after_hold"] = ""
+
+    if conversation_memory.get("awaiting_callback_time"):
+        if available_to_talk(user_text) and not asks_to_call_later(user_text):
+            conversation_memory["awaiting_callback_time"] = False
+        else:
+            return confirm_callback(callback_time_named(user_text) or "later")
+
     if stage == "greeting":
-        if asks_to_call_later(user_text):
-            return advisor_followup_twiml()
+        if wants_a_callback(user_text):
+            return ask_or_confirm_callback(user_text)
         if (
             is_positive(user_text)
             or available_to_talk(user_text)
+            or agrees_to_talk_now(user_text)
             or catalog.project_named_in(user_text)
         ):
             conversation_memory["stage"] = "qualify"
@@ -4270,7 +4634,12 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
 """
             return Response(content=twiml, media_type="application/xml")
 
-        if is_clear_negative(user_text):
+        if is_a_hold(user_text):
+            return hold_twiml()
+
+        if is_clear_negative(user_text) or greeting_starts_with_no(user_text):
+            if declines_the_project(user_text):
+                return advisor_followup_twiml()
             conversation_memory["stage"] = "closed"
             return Response(
                 content=polite_exit_twiml(
@@ -4279,10 +4648,13 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
                 media_type="application/xml",
             )
 
-        return Response(
-            content=qualification_twiml("Is now a good time for a quick call?"),
-            media_type="application/xml",
-        )
+        if is_bare_configuration_word(user_text):
+            return Response(
+                content=qualification_twiml("Is now a good time for a quick call?"),
+                media_type="application/xml",
+            )
+
+        return answer_then_ask(user_text, "Is now a good time for a quick call?")
 
     if stage == "qualify":
         waiting = wait_response(user_text)
@@ -4293,7 +4665,7 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
             return stopped
         if needs_time(user_text):
             return time_to_decide_twiml()
-        guided = route_known(catalog_reply(user_text))
+        guided = _catalog_or_model(user_text)
         if guided:
             return guided
         floor = response_for(reply_for_floor_plan(user_text))
@@ -4347,7 +4719,7 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
             return stopped
         if needs_time(user_text):
             return time_to_decide_twiml()
-        guided = route_known(catalog_reply(user_text))
+        guided = _catalog_or_model(user_text)
         if guided:
             return guided
         floor = response_for(reply_for_floor_plan(user_text))

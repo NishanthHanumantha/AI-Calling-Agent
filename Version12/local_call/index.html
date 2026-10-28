@@ -96,6 +96,7 @@
     let playback = null;
     let greetingAudible = false;
     let callHeard = false;
+    let bargeInReady = false;
 
     function setStatus(text) { statusEl.textContent = text; }
 
@@ -305,7 +306,7 @@
             }
             greetingAudible = true;
             callHeard = true;
-            if (!resumed) armBargeIn(session);
+            if (!resumed && bargeInReady) armBargeIn(session);
             return true;
           };
           audio.hold = () => {
@@ -924,13 +925,20 @@
         setStatus("Speaking.");
         busy = false;
         greetingAudible = false;
+        bargeInReady = callHeard;
         const outcome = await beginPlayback(data.reply);
         if (outcome === "failed") {
           missedClause();
           return;
         }
         if (!active) return;
-        if (outcome === "interrupted" && capture && capture.phase === "customer") return;
+        if (outcome === "interrupted" && !bargeInReady) {
+          if (capture && (capture.phase === "interrupt" || capture.phase === "confirm" || capture.phase === "customer")) {
+            releaseMic();
+          }
+        } else if (outcome === "interrupted" && capture && capture.phase === "customer") {
+          return;
+        }
       }
       busy = false;
       if (data.ended) {
