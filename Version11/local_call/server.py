@@ -21,7 +21,7 @@ from pathlib import Path
 import edge_tts
 from dotenv import load_dotenv
 import requests
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile, WebSocket
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -528,6 +528,42 @@ def _remaining_chunks(response, first, pending):
             response.close()
 
 
+def joined_audio(response, first, pending) -> bytes:
+    """The full WAV from the same stream the page plays clause by clause."""
+    return b"".join(_remaining_chunks(response, first, pending))
+
+
+async def clause_bytes(text: str):
+    """One clause as WAV or MP3, on the same Bulbul then Neerja path as the page."""
+    written = (text or "").strip()
+    english = for_speech(written)
+    if not english:
+        return None
+    started = time.perf_counter()
+    language = app_v3.customer_language()
+    spoken = english
+    if language in app_v3.SPOKEN_LANGUAGES:
+        translated = translate_text(written, language)
+        if translated:
+            spoken = translated
+        else:
+            language = "en-IN"
+    app_v3.conversation_memory["speech_language"] = language
+    stream = open_bulbul_stream(spoken, language)
+    first, pending = first_audio_chunk(stream)
+    if not first:
+        if stream is not None and hasattr(stream, "close"):
+            stream.close()
+        audio = await neerja_audio(english)
+        if not audio:
+            return None
+        call_log.note_tts(int((time.perf_counter() - started) * 1000))
+        return audio, "audio/mpeg"
+    audio = joined_audio(stream, first, pending)
+    call_log.note_tts(int((time.perf_counter() - started) * 1000))
+    return audio, "audio/wav"
+
+
 def lone_yes(transcript):
     """True when the clip is only a one-word yes, the sound a noisy room often becomes."""
     raw = re.sub(r"[^a-z\s]", " ", (transcript or "").lower())
@@ -710,13 +746,9 @@ def transcript_is_only_keyterms(text):
     return re.search(r"[a-z0-9]", remaining) is None
 
 
-@local_app.post("/local/listen")
-async def listen(file: UploadFile = File(...), heard: str = Form("1")):
-    """Transcribe one microphone clip. The browser speech service is not used."""
-    audio = await file.read()
-    if len(audio) < 800:
-        return {"text": ""}
-    if not clip_has_speech(audio):
+def transcribe_clip(audio: bytes, heard: str = "1") -> dict:
+    """Saaras on one clip. The browser speech service is not used."""
+    if len(audio) < 800 or not clip_has_speech(audio):
         return {"text": ""}
     if not app_v3.SARVAM_API_KEY:
         return {"text": "", "error": "Speech transcription is not configured."}
@@ -754,6 +786,20 @@ async def listen(file: UploadFile = File(...), heard: str = Form("1")):
         app_v3.note_detected_language(body.get("language_code"))
         call_log.note_stt(transcript, int((time.perf_counter() - started) * 1000))
     return {"text": transcript}
+
+
+@local_app.post("/local/listen")
+async def listen(file: UploadFile = File(...), heard: str = Form("1")):
+    """Transcribe one microphone clip. The browser speech service is not used."""
+    return transcribe_clip(await file.read(), heard)
+
+
+@local_app.websocket("/exotel/media")
+async def exotel_media(socket: WebSocket):
+    """Exotel voice socket. The script and the voice stay the ones on this page."""
+    from local_call.phone import phone_socket
+
+    await phone_socket(socket)
 
 
 if __name__ == "__main__":
