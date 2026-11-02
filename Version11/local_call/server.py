@@ -41,6 +41,7 @@ sys.path.insert(0, str(ROOT))
 import app_v3  # noqa: E402
 from local_call.call_record import CallLog  # noqa: E402
 from local_call.evaluate import evaluate_saved_call  # noqa: E402
+from local_call.usage_note import current_model, usage_from_body, wav_seconds  # noqa: E402
 
 local_app = FastAPI()
 PAGE = Path(__file__).with_name("index.html")
@@ -112,7 +113,7 @@ async def start_call():
         _save_and_score()
     call_log.begin()
     payload = payload_from(await app_v3.voice())
-    call_log.add_reply(payload["reply"], payload["stage"], None)
+    call_log.add_reply(payload["reply"], payload["stage"], None, card=_take_card())
     prepare_upcoming(payload["reply"])
     return payload
 
@@ -137,15 +138,37 @@ async def take_turn(turn: Turn):
     async def run():
         return await app_v3.handle_speech(_Request(speech), SpeechResult=speech)
 
-    response, llm_ms = await _timed_chat(run)
+    app_v3.conversation_memory.pop("reply_card", None)
+    response, llm_ms, calls = await _timed_chat(run)
     payload = payload_from(response)
-    call_log.add_reply(payload["reply"], payload["stage"], llm_ms, customer=speech)
+    call_log.add_model_calls(calls)
+    call_log.add_reply(
+        payload["reply"],
+        payload["stage"],
+        llm_ms,
+        customer=speech,
+        card=_take_card(),
+    )
     prepare_upcoming(payload["reply"])
     return payload
 
 
+def _take_card():
+    return app_v3.conversation_memory.pop("reply_card", None)
+
+
+def _chat_usage(response) -> dict:
+    try:
+        body = response.json()
+    except Exception:
+        body = None
+    usage = usage_from_body(body)
+    usage["function"] = current_model() or "chat"
+    return usage
+
+
 async def _timed_chat(action):
-    captured = {"ms": None}
+    captured = {"ms": None, "calls": []}
     original = app_v3.requests.post
 
     def wrapped(url, *args, **kwargs):
@@ -154,13 +177,15 @@ async def _timed_chat(action):
             return original(url, *args, **kwargs)
         started = time.perf_counter()
         try:
-            return original(url, *args, **kwargs)
+            response = original(url, *args, **kwargs)
+            captured["calls"].append(_chat_usage(response))
+            return response
         finally:
             captured["ms"] = int((time.perf_counter() - started) * 1000)
 
     app_v3.requests.post = wrapped
     try:
-        return await action(), captured["ms"]
+        return await action(), captured["ms"], captured["calls"]
     finally:
         app_v3.requests.post = original
 
@@ -233,6 +258,7 @@ def clear_translations():
 def _request_translation(text, target):
     """Ask Sarvam for one clause. None when the call does not return text."""
     try:
+        posted = text[:2000]
         response = requests.post(
             TRANSLATE_URL,
             headers={
@@ -240,7 +266,7 @@ def _request_translation(text, target):
                 "Content-Type": "application/json",
             },
             json={
-                "input": text[:2000],
+                "input": posted,
                 "source_language_code": "en-IN",
                 "target_language_code": target,
                 "model": "sarvam-translate:v1",
@@ -250,6 +276,7 @@ def _request_translation(text, target):
             },
             timeout=2,
         )
+        call_log.note_translate(len(posted))
     except requests.Timeout:
         print("LOCAL TRANSLATE STATUS: timeout")
         return None
@@ -472,6 +499,7 @@ def open_bulbul_stream(text, language_code="en-IN"):
             stream=True,
             timeout=4,
         )
+        call_log.note_bulbul(len((text or "")[:2500]))
     except requests.RequestException as exc:
         print("LOCAL TTS STATUS:", type(exc).__name__)
         return None
@@ -604,6 +632,7 @@ def mostly_echo(transcript, line):
 
 
 async def neerja_audio(text):
+    call_log.note_neerja(len(text or ""))
     communicate = edge_tts.Communicate(text, VOICE)
     parts = []
     try:
@@ -752,6 +781,7 @@ def transcribe_clip(audio: bytes, heard: str = "1") -> dict:
         return {"text": ""}
     if not app_v3.SARVAM_API_KEY:
         return {"text": "", "error": "Speech transcription is not configured."}
+    call_log.note_audio(wav_seconds(audio))
     started = time.perf_counter()
     response = requests.post(
         "https://api.sarvam.ai/speech-to-text",

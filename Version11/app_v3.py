@@ -1085,6 +1085,8 @@ def generate_response(user_query, intent, brochure_context, top_score):
     }
 
     try:
+        from local_call.usage_note import tag_model
+        tag_model("generate_response")
         response = requests.post(
             SARVAM_URL,
             headers=headers,
@@ -3275,6 +3277,8 @@ def unmatched_model_answer(user_text):
         "max_tokens": 120,
     }
     try:
+        from local_call.usage_note import tag_model
+        tag_model("unmatched_model_answer")
         response = requests.post(
             SARVAM_URL,
             headers={
@@ -3714,6 +3718,12 @@ def _price_for_named_home(user_text):
     return f"{body} Our sales advisor can share the price for a {shown} bedroom home."
 
 
+def _remember_card(label, body):
+    if body:
+        conversation_memory["reply_card"] = label
+    return body
+
+
 def reply_from_active_cards(user_text):
     """Location, size, price, and amenities come from the projects in focus."""
     ids = conversation_memory.get("active_project_ids") or []
@@ -3723,7 +3733,7 @@ def reply_from_active_cards(user_text):
     if len(focus) == 1 and focus[0]["id"] == "sobha-townpark":
         return None
     if _asks_for_a_price(user_text):
-        return _price_for_named_home(user_text)
+        return _remember_card("price", _price_for_named_home(user_text))
     intent = detect_intent(user_text)
     if intent not in ("location", "floorplan", "pricing", "amenities"):
         return None
@@ -3731,10 +3741,13 @@ def reply_from_active_cards(user_text):
         return None
     if intent == "pricing":
         body = price_statement()
+        label = "price"
     elif intent == "location":
         body = _location_reply(user_text)
+        label = "location"
     else:
         body = answer_from_kb(intent)
+        label = "size" if intent == "floorplan" else "amenities"
         if intent == "floorplan":
             remember_covered("home")
         elif intent == "amenities":
@@ -3742,8 +3755,8 @@ def reply_from_active_cards(user_text):
     if not body:
         return None
     if len(focus) > 1 and "?" not in body:
-        return f"{body} What would you like to know about them?"
-    return body
+        return _remember_card(label, f"{body} What would you like to know about them?")
+    return _remember_card(label, body)
 
 
 def unclear_prompt(user_text):
