@@ -1410,6 +1410,8 @@ def refuses_details(text):
 def defers_the_visit(text):
     """The customer is putting the visit off, not asking for another topic."""
     low = (text or "").lower()
+    if re.search(r"\bi (?:will|'ll) check and tell you\b", low):
+        return True
     if re.search(
         r"\b(let you know later|let me know later|i'?ll let you know|i will let you know|"
         r"(?:come|get) back(?: to you)? later|"
@@ -1422,6 +1424,19 @@ def defers_the_visit(text):
         r"\blook into (?:it|the project|this)\b",
         low,
     ) is not None
+
+
+def unstored_detail_named(text):
+    """A fact the project card does not store. Price words do not move this to the price."""
+    return re.search(
+        r"\b(maintenance|parking|rera|possession|approval|builder)\b",
+        text or "",
+        re.I,
+    ) is not None
+
+
+def unstored_detail_line():
+    return "That detail is not confirmed. Our sales advisor can share it."
 
 
 def has_not_finalized(text):
@@ -3126,6 +3141,7 @@ def reset_memory():
     conversation_memory["customer_language"] = "en-IN"
     conversation_memory["speech_language"] = "en-IN"
     conversation_memory["clause_pairs"] = []
+    conversation_memory["reply_card"] = None
 
 
 def grounded_reply(user_text):
@@ -3224,7 +3240,7 @@ def _repeats_the_open_question(reply):
 
 
 def _catalog_or_model(user_text):
-    """Use the catalog reply. A pure repeat of an unmatched line goes to the model."""
+    """Use the catalog reply. A sentence the script does not own goes to the model."""
     saved = {
         key: conversation_memory.get(key)
         for key in (
@@ -3236,6 +3252,13 @@ def _catalog_or_model(user_text):
         )
     }
     reply = catalog_reply(user_text)
+    if (
+        reply is None
+        and conversation_memory.get("awaiting_suggestion")
+        and not _script_owns(user_text)
+    ):
+        question = (conversation_memory.get("last_agent_question") or "").strip()
+        return answer_then_ask(user_text, question or catalog.AREA_QUESTION)
     if _repeats_the_open_question(reply) and not _script_owns(user_text):
         conversation_memory.update(saved)
         return answer_then_ask(user_text, conversation_memory.get("last_agent_question"))
@@ -3726,6 +3749,8 @@ def _remember_card(label, body):
 
 def reply_from_active_cards(user_text):
     """Location, size, price, and amenities come from the projects in focus."""
+    if unstored_detail_named(user_text):
+        return unstored_detail_line()
     ids = conversation_memory.get("active_project_ids") or []
     if not ids:
         return None
@@ -4229,11 +4254,40 @@ def _places_for_offer(chosen):
     return f"{line} What would you like to know about it?"
 
 
+def _asks_for_a_cheaper_option(text):
+    """A price objection with no rupee amount. A stated budget stays on the ceiling."""
+    if catalog.budget_ceiling(text)[0] is not None:
+        return False
+    return re.search(
+        r"\b(costly|cheaper|expensive|too much|over budget|other options?)\b",
+        text or "",
+        re.I,
+    ) is not None
+
+
+def _suggest_cheaper_than(pending):
+    """Offer the other stored matches below the project just named."""
+    priced = [project for project in pending if project.get("price_crore") is not None]
+    if not priced:
+        return None
+    offered = max(priced, key=lambda project: project["price_crore"])
+    conversation_memory["price_ceiling"] = offered["price_crore"]
+    conversation_memory["price_strict"] = True
+    conversation_memory["customer_place"] = None
+    conversation_memory["active_project_ids"] = []
+    conversation_memory["catalog_done"] = False
+    conversation_memory["awaiting_suggestion"] = False
+    conversation_memory["narrow_asked"] = True
+    return _suggest_catalog()
+
+
 def _answer_suggestion(user_text):
     named = catalog.project_named_in(user_text)
     if catalog.outside_project_named(user_text) and not named:
         return "ADVISOR"
     if is_clear_negative(user_text):
+        return "ADVISOR"
+    if finished_this_topic(user_text):
         return "ADVISOR"
     pending = [
         catalog.BY_ID[item]
@@ -4254,6 +4308,10 @@ def _answer_suggestion(user_text):
         return _pair_brief(pending)
     if len(named) == 1:
         return _opened_project(named[0])
+    if _asks_for_a_cheaper_option(user_text) and pending:
+        cheaper = _suggest_cheaper_than(pending)
+        if cheaper:
+            return cheaper
     if _accepts_the_offer(user_text) and len(pending) == 1:
         if re.search(r"\b(other details|more details|already told|already said)\b", user_text or "", re.I):
             project = pending[0]
@@ -4278,17 +4336,11 @@ def _answer_suggestion(user_text):
         conversation_memory["awaiting_suggestion"] = False
         conversation_memory["narrow_asked"] = True
         return _suggest_catalog()
-    _absorb_catalog(user_text)
-    conversation_memory["awaiting_suggestion"] = False
-    nxt = _suggest_catalog()
-    if (
-        len(pending) == 1
-        and isinstance(nxt, str)
-        and "interested to know about the project" in nxt.lower()
-        and pending[0]["spoken"].lower() in nxt.lower()
-    ):
-        return _opened_project(pending[0])
-    return nxt
+    if _script_owns(user_text):
+        _absorb_catalog(user_text)
+        conversation_memory["awaiting_suggestion"] = False
+        return _suggest_catalog()
+    return None
 
 
 def _offered_places():
@@ -4608,6 +4660,21 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
     user_text = correct_stt(raw_text, stage=stage)
     note_requested_language(user_text)
     conversation_memory["size_closed_before_turn"] = bool(conversation_memory.get("size_decided"))
+    pending_offer = conversation_memory.get("awaiting_suggestion") and conversation_memory.get(
+        "pending_project_ids"
+    )
+    if _asks_to_change_language(user_text) and not pending_offer:
+        question = (conversation_memory.get("last_agent_question") or "").strip()
+        if not question:
+            question = "Is now a good time for a quick call?"
+        return Response(content=qualification_twiml(question), media_type="application/xml")
+    if unstored_detail_named(user_text):
+        return Response(
+            content=qualification_twiml(unstored_detail_line()),
+            media_type="application/xml",
+        )
+    if conversation_memory.get("visit_offered") and defers_the_visit(user_text):
+        return advisor_followup_twiml()
 
     print("=" * 50)
     print("CUSTOMER SAID (raw):", raw_text)

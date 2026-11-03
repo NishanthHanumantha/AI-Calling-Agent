@@ -13,7 +13,7 @@
       color: #1c1915;
     }
     main {
-      max-width: 40rem;
+      max-width: 46rem;
       margin: 0 auto;
       padding: 2rem 1.25rem 3rem;
     }
@@ -59,6 +59,20 @@
       color: #6b645b;
       margin-bottom: 0.2rem;
     }
+    #trace, #log li.trace {
+      font-family: "Segoe UI", sans-serif;
+      font-size: 0.88rem;
+      line-height: 1.45;
+    }
+    #trace {
+      background: #fff;
+      border: 1px solid #ddd6c8;
+      border-radius: 8px;
+      padding: 0.8rem 1rem;
+      margin-top: 1rem;
+    }
+    #trace p { margin: 0.2rem 0; }
+    #log li.trace { background: #f7f4ee; }
   </style>
 </head>
 <body>
@@ -76,6 +90,10 @@
       <button id="hangup" type="button" disabled>Hang up</button>
     </div>
     <p id="status">Ready.</p>
+    <section id="trace" hidden>
+      <p id="pace"></p>
+      <p id="cost"></p>
+    </section>
     <ul id="log"></ul>
   </main>
   <script>
@@ -84,6 +102,9 @@
     const hangupBtn = document.getElementById("hangup");
     const statusEl = document.getElementById("status");
     const logEl = document.getElementById("log");
+    const traceEl = document.getElementById("trace");
+    const paceEl = document.getElementById("pace");
+    const costEl = document.getElementById("cost");
     const MIC = {
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
     };
@@ -119,6 +140,127 @@
       item.append(label, document.createTextNode(text));
       logEl.append(item);
       item.scrollIntoView({ block: "nearest" });
+    }
+
+    function blank(value, suffix) {
+      if (value === null || value === undefined || value === "") return "—";
+      return suffix ? value + " " + suffix : String(value);
+    }
+
+    function rupee(value) {
+      if (value === null || value === undefined) return "—";
+      return "₹" + value;
+    }
+
+    function showRunning(trace) {
+      const averages = trace.averages || {};
+      const usage = trace.usage || {};
+      const model = usage.language_model || {};
+      const speech = usage.speech_to_text || {};
+      const voice = usage.bulbul || {};
+      const translation = usage.translation || {};
+      traceEl.hidden = false;
+      paceEl.textContent = "Script decision " + blank(averages.script_ms, "ms")
+        + " · Model decision " + blank(averages.model_ms, "ms");
+      costEl.textContent = "Rates checked " + (usage.rates_checked || "—")
+        + ". Language model " + rupee(model.inr_ex_gst)
+        + " · Speech to text " + rupee(speech.inr_ex_gst)
+        + " · Bulbul " + rupee(voice.inr_ex_gst)
+        + " · Translation " + rupee(translation.inr_ex_gst)
+        + " (ex GST " + rupee(usage.inr_ex_gst)
+        + ", with GST " + rupee(usage.inr_with_gst) + ")";
+    }
+
+    function costText(label, amount, unit, suffix) {
+      const quantity = amount && amount[unit];
+      const shown = quantity == null ? "—" : quantity + " " + suffix;
+      return label + " " + shown
+        + ", " + rupee(amount && amount.inr_ex_gst) + " ex GST"
+        + ", " + rupee(amount && amount.inr_with_gst) + " with GST";
+    }
+
+    function turnRow(index) {
+      return logEl.querySelector('li.trace[data-turn="' + index + '"]');
+    }
+
+    function fillCost(row, turn) {
+      const speech = row.querySelector("[data-cost='speech']");
+      const voice = row.querySelector("[data-cost='bulbul']");
+      const translated = row.querySelector("[data-cost='translation']");
+      if (speech) speech.textContent = costText("Speech to text", turn.speech_to_text, "seconds", "s");
+      if (voice) voice.textContent = costText("Bulbul", turn.bulbul, "characters", "characters");
+      if (translated) translated.textContent = costText("Translation", turn.translation, "characters", "characters");
+      const count = (turn.neerja || {}).characters || 0;
+      let neerja = row.querySelector("[data-cost='neerja']");
+      if (!count) {
+        if (neerja) neerja.remove();
+        return;
+      }
+      if (!neerja) {
+        neerja = document.createElement("div");
+        neerja.dataset.cost = "neerja";
+        row.append(neerja);
+      }
+      neerja.textContent = "Neerja " + count + " characters";
+    }
+
+    function applyTurnCost(turn) {
+      if (!turn || turn.turn_index == null) return;
+      const row = turnRow(turn.turn_index);
+      if (row) fillCost(row, turn);
+    }
+
+    function showTrace(trace) {
+      if (!trace) return;
+      showRunning(trace);
+      if (trace.previous) applyTurnCost(trace.previous);
+      const turn = trace.turn;
+      if (!turn) return;
+      if (turnRow(turn.turn_index)) {
+        applyTurnCost(turn);
+        return;
+      }
+      const item = document.createElement("li");
+      item.className = "trace";
+      item.dataset.turn = String(turn.turn_index);
+      const title = document.createElement("span");
+      title.className = "who";
+      title.textContent = "This turn";
+      item.append(title);
+      const lines = [
+        turn.customer ? "Customer: " + turn.customer : "",
+        "Answered by " + (turn.source || "—"),
+        "Stage " + (turn.stage || "—"),
+        "Heard in " + blank(turn.stt_ms, "ms"),
+        "Decision " + blank(turn.decision_ms, "ms"),
+        "Model " + blank(turn.llm_ms, "ms"),
+        "First voice " + blank(turn.tts_ms, "ms"),
+        "Tokens prompt " + blank(turn.prompt_tokens)
+          + ", completion " + blank(turn.completion_tokens)
+          + ", cached " + blank(turn.cached_tokens)
+      ].filter(Boolean);
+      lines.forEach((line) => {
+        const row = document.createElement("div");
+        row.textContent = line;
+        if (line.indexOf("First voice") === 0) row.dataset.voice = "1";
+        item.append(row);
+      });
+      ["speech", "bulbul", "translation"].forEach((name) => {
+        const row = document.createElement("div");
+        row.dataset.cost = name;
+        item.append(row);
+      });
+      fillCost(item, turn);
+      logEl.append(item);
+      item.scrollIntoView({ block: "nearest" });
+    }
+
+    function noteFirstVoice(value) {
+      const rows = logEl.querySelectorAll("li.trace [data-voice]");
+      const slot = rows[rows.length - 1];
+      if (!slot || slot.dataset.filled) return;
+      slot.dataset.filled = "1";
+      slot.textContent = "First voice " + value + " ms";
     }
 
     function spokenWords(text) {
@@ -165,11 +307,21 @@
       return places.filter((place) => low.includes(place));
     }
 
+    function purposeChoice(transcript, line) {
+      const asked = (line || "").toLowerCase();
+      if (!asked.includes("live in") || !asked.includes("investment")) return false;
+      const said = (transcript || "").toLowerCase();
+      const live = /\b(to live|live in|for living|own use|end use)\b/.test(said);
+      const invest = /\binvestment\b/.test(said);
+      return live !== invest;
+    }
+
     function isEcho(transcript, line) {
       if (namedParts(transcript).length === 1) return false;
       const chosen = namedPlaces(transcript);
       const offered = namedPlaces(line);
       if (chosen.length === 1 && offered.length > 1 && offered.includes(chosen[0])) return false;
+      if (purposeChoice(transcript, line)) return false;
       const said = spokenWords(transcript);
       const agent = new Set(spokenWords(line));
       if (said.length < 2 || agent.size === 0) return false;
@@ -343,7 +495,8 @@
             callHeard = true;
             if (bargeInReady) armBargeIn(session);
             else armGreetingListen();
-            armDeadline((buffer.duration + 2) * 1000);
+            const clipMs = (buffer.duration + 2) * 1000;
+            armDeadline(Math.min(20000, Math.max(4000, clipMs)));
           };
           const resumed = ctx.resume();
           if (resumed && resumed.then) resumed.then(startNode).catch(giveUp);
@@ -397,6 +550,12 @@
         signal: controller.signal
       }).then(async (response) => {
         if (!response.ok) throw new Error("The voice did not speak.");
+        const voiceMs = response.headers.get("X-Tts-Ms");
+        if (voiceMs) noteFirstVoice(voiceMs);
+        const turnCost = response.headers.get("X-Turn-Cost");
+        if (turnCost) {
+          try { applyTurnCost(JSON.parse(turnCost)); } catch (error) {}
+        }
         const marked = (response.headers.get("X-Audio-Format") || "").toLowerCase();
         if (marked && marked !== "wav" && marked !== "mp3") {
           throw new Error("The voice did not speak.");
@@ -556,7 +715,7 @@
       capture.processor.disconnect();
       capture.source.disconnect();
       capture.mute.disconnect();
-      capture.context.close().catch(() => {});
+      if (capture.context !== voiceCtx) capture.context.close().catch(() => {});
       capture.stream.getTracks().forEach((track) => track.stop());
       clearTimeout(capture.maxTimer);
       capture = null;
@@ -682,7 +841,18 @@
       let stream;
       try {
         try {
-          stream = await navigator.mediaDevices.getUserMedia(MIC);
+          const request = navigator.mediaDevices.getUserMedia(MIC);
+          try {
+            stream = await Promise.race([
+              request,
+              new Promise((_, reject) => {
+                setTimeout(() => reject(Object.assign(new Error("mic"), { name: "TimeoutError" })), 8000);
+              })
+            ]);
+          } catch (error) {
+            request.then((opened) => opened.getTracks().forEach((track) => track.stop())).catch(() => {});
+            throw error;
+          }
         } catch (error) {
           endCall(error.name === "NotAllowedError"
             ? "Microphone access is blocked for Cursor. In Windows, open Settings, Privacy and security, Microphone, and allow desktop apps."
@@ -693,8 +863,13 @@
           stream.getTracks().forEach((track) => track.stop());
           return;
         }
-      const context = new AudioContext();
-      await context.resume();
+      const context = unlockVoice();
+      if (!context) {
+        endCall("This window cannot play the voice.");
+        return;
+      }
+      const resumed = context.resume();
+      if (resumed && resumed.then) await resumed;
       const source = context.createMediaStreamSource(stream);
       const processor = context.createScriptProcessor(4096, 1, 1);
       const mute = context.createGain();
@@ -951,6 +1126,7 @@
       const data = await response.json();
       if (data.reply) {
         addLine("Agent", data.reply);
+        showTrace(data.trace);
         setStatus("Speaking.");
         busy = false;
         greetingAudible = false;
@@ -986,6 +1162,7 @@
         const next = await resumed.json();
         if (next.reply) {
           addLine("Agent", next.reply);
+          showTrace(next.trace);
           setStatus("Speaking.");
           const outcome = await beginPlayback(next.reply);
           if (!active) return;
@@ -1025,6 +1202,7 @@
       try {
         const response = await fetch("/local/end", { method: "POST" });
         const data = await response.json();
+        if (data.trace) showTrace(data.trace);
         setStatus(data.scorecard ? message + " Scorecard saved." : message);
       } catch (error) {
         setStatus(message);
@@ -1039,6 +1217,9 @@
         return;
       }
       logEl.replaceChildren();
+      traceEl.hidden = true;
+      paceEl.textContent = "";
+      costEl.textContent = "";
       unlockVoice();
       active = true;
       callHeard = false;

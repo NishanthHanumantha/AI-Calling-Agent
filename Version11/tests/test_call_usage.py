@@ -36,7 +36,8 @@ def _run_chat(body):
     async def action():
         return app_v3.requests.post("https://api.sarvam.ai/v1/chat/completions")
 
-    return asyncio.run(server._timed_chat(action))
+    _response, elapsed, calls, _decision_ms = asyncio.run(server._timed_chat(action))
+    return _response, elapsed, calls
 
 
 def test_a_usage_block_is_stored_on_the_turn():
@@ -140,7 +141,7 @@ def test_one_bulbul_text_records_its_characters(monkeypatch):
     finally:
         app_v3.SARVAM_API_KEY = previous
     assert server.call_log.turns[-1]["bulbul_characters"] == len("Hello there.")
-    assert server.call_log.usage()["bulbul"]["inr_ex_gst"] == round(len("Hello there.") * 3 / 1000, 4)
+    assert server.call_log.usage()["bulbul"]["inr_ex_gst"] == round(len("Hello there.") * 1 / 1000, 4)
 
 
 def test_a_price_question_is_labelled_from_the_project_card():

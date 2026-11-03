@@ -28,8 +28,8 @@ from pydantic import BaseModel
 VOICE = "en-IN-NeerjaNeural"
 BULBUL_URL = "https://api.sarvam.ai/text-to-speech"
 BULBUL_STREAM_URL = "https://api.sarvam.ai/text-to-speech/stream"
-BULBUL_MODEL = "bulbul:v3"
-BULBUL_SPEAKER = "ishita"
+BULBUL_MODEL = "bulbul:v4-flash"
+BULBUL_SPEAKER = "ishita_enhi_customer"
 TRANSLATE_URL = "https://api.sarvam.ai/translate"
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,7 +41,15 @@ sys.path.insert(0, str(ROOT))
 import app_v3  # noqa: E402
 from local_call.call_record import CallLog  # noqa: E402
 from local_call.evaluate import evaluate_saved_call  # noqa: E402
-from local_call.usage_note import current_model, usage_from_body, wav_seconds  # noqa: E402
+from local_call.usage_note import (  # noqa: E402
+    BULBUL_INR_PER_CHARACTER,
+    STT_INR_PER_SECOND,
+    TRANSLATE_INR_PER_CHARACTER,
+    current_model,
+    priced,
+    usage_from_body,
+    wav_seconds,
+)
 
 local_app = FastAPI()
 PAGE = Path(__file__).with_name("index.html")
@@ -112,23 +120,34 @@ async def start_call():
     if call_log.turns and not call_log.saved:
         _save_and_score()
     call_log.begin()
+    started = time.perf_counter()
     payload = payload_from(await app_v3.voice())
-    call_log.add_reply(payload["reply"], payload["stage"], None, card=_take_card())
+    decision_ms = int((time.perf_counter() - started) * 1000)
+    call_log.add_reply(
+        payload["reply"],
+        payload["stage"],
+        None,
+        card=_take_card(),
+        decision_ms=decision_ms,
+    )
     prepare_upcoming(payload["reply"])
+    payload["trace"] = trace_snapshot()
     return payload
 
 
 @local_app.post("/local/resume")
 def resume_after_hold():
     """Speak the saved question after a quiet hold. This does not call the model."""
+    started = time.perf_counter()
     question = (app_v3.conversation_memory.get("question_after_hold") or "").strip()
     app_v3.conversation_memory["question_after_hold"] = ""
     if question:
         app_v3.remember_spoken(question)
     stage = app_v3.conversation_memory.get("stage", "")
-    call_log.add_reply(question, stage, None)
+    decision_ms = int((time.perf_counter() - started) * 1000)
+    call_log.add_reply(question, stage, None, decision_ms=decision_ms)
     prepare_upcoming(question)
-    return {"reply": question, "ended": False, "stage": stage}
+    return {"reply": question, "ended": False, "stage": stage, "trace": trace_snapshot()}
 
 
 @local_app.post("/local/turn")
@@ -139,7 +158,7 @@ async def take_turn(turn: Turn):
         return await app_v3.handle_speech(_Request(speech), SpeechResult=speech)
 
     app_v3.conversation_memory.pop("reply_card", None)
-    response, llm_ms, calls = await _timed_chat(run)
+    response, llm_ms, calls, decision_ms = await _timed_chat(run)
     payload = payload_from(response)
     call_log.add_model_calls(calls)
     call_log.add_reply(
@@ -148,8 +167,10 @@ async def take_turn(turn: Turn):
         llm_ms,
         customer=speech,
         card=_take_card(),
+        decision_ms=decision_ms,
     )
     prepare_upcoming(payload["reply"])
+    payload["trace"] = trace_snapshot()
     return payload
 
 
@@ -168,26 +189,125 @@ def _chat_usage(response) -> dict:
 
 
 async def _timed_chat(action):
+    """Time the whole decision, and time a chat request on its own."""
     captured = {"ms": None, "calls": []}
     original = app_v3.requests.post
+    started = time.perf_counter()
 
     def wrapped(url, *args, **kwargs):
         target = url if isinstance(url, str) else ""
         if "chat/completions" not in target:
             return original(url, *args, **kwargs)
-        started = time.perf_counter()
+        chat_started = time.perf_counter()
         try:
             response = original(url, *args, **kwargs)
             captured["calls"].append(_chat_usage(response))
             return response
         finally:
-            captured["ms"] = int((time.perf_counter() - started) * 1000)
+            captured["ms"] = int((time.perf_counter() - chat_started) * 1000)
 
     app_v3.requests.post = wrapped
     try:
-        return await action(), captured["ms"], captured["calls"]
+        result = await action()
+        decision_ms = int((time.perf_counter() - started) * 1000)
+        return result, captured["ms"], captured["calls"], decision_ms
     finally:
         app_v3.requests.post = original
+
+
+def _average_ms(values: list[int]) -> int | None:
+    if not values:
+        return None
+    return int(round(sum(values) / len(values)))
+
+
+def _turn_tokens(turn: dict) -> dict:
+    calls = turn.get("model_calls") or []
+    if not calls:
+        return {"prompt_tokens": None, "completion_tokens": None, "cached_tokens": None}
+
+    def total(key):
+        values = [call.get(key) for call in calls]
+        if any(value is None for value in values):
+            return None
+        return sum(values)
+
+    cached_values = [call.get("cached_tokens") for call in calls]
+    cached = None if all(value is None for value in cached_values) else total("cached_tokens")
+    return {
+        "prompt_tokens": total("prompt_tokens"),
+        "completion_tokens": total("completion_tokens"),
+        "cached_tokens": cached,
+    }
+
+
+def _voice_amounts(turn: dict) -> dict:
+    """Price this turn's speech, voice, and translation. A missing clip stays blank."""
+    seconds = turn.get("stt_seconds")
+    characters = turn.get("bulbul_characters") or 0
+    translated = turn.get("translation_characters") or 0
+    return {
+        "speech_to_text": {"seconds": seconds, **priced(seconds, STT_INR_PER_SECOND)},
+        "bulbul": {"characters": characters, **priced(characters, BULBUL_INR_PER_CHARACTER)},
+        "translation": {
+            "characters": translated,
+            **priced(translated, TRANSLATE_INR_PER_CHARACTER),
+        },
+        "neerja": {"characters": turn.get("neerja_characters") or 0},
+    }
+
+
+def _trace_turn(turn: dict) -> dict:
+    return {
+        "turn_index": turn.get("turn_index"),
+        "customer": turn.get("customer"),
+        "reply": turn.get("reply"),
+        "stage": turn.get("stage"),
+        "source": turn.get("source"),
+        "stt_ms": turn.get("stt_ms"),
+        "decision_ms": turn.get("decision_ms"),
+        "llm_ms": turn.get("llm_ms"),
+        "tts_ms": turn.get("tts_ms"),
+        **_turn_tokens(turn),
+        **_voice_amounts(turn),
+    }
+
+
+def _pace(turns: list[dict]) -> dict:
+    script = []
+    model = []
+    for turn in turns:
+        decision = turn.get("decision_ms")
+        if decision is None:
+            continue
+        if turn.get("model_calls"):
+            model.append(decision)
+        else:
+            script.append(decision)
+    return {"script_ms": _average_ms(script), "model_ms": _average_ms(model)}
+
+
+def trace_snapshot() -> dict:
+    """The latest turn and the running cost. The spoken reply is unchanged."""
+    turns = list(call_log.turns)
+    latest = turns[-1] if turns else None
+    previous = turns[-2] if len(turns) > 1 else None
+    usage = call_log.usage()
+    return {
+        "turn": _trace_turn(latest) if latest else None,
+        "previous": _trace_turn(previous) if previous else None,
+        "usage": {
+            "rates_checked": usage["rates_checked"],
+            "language_model": usage["language_model"],
+            "speech_to_text": usage["speech_to_text"],
+            "bulbul": usage["bulbul"],
+            "translation": usage["translation"],
+            "inr_ex_gst": usage["inr_ex_gst"],
+            "inr_with_gst": usage["inr_with_gst"],
+            "priced_complete": usage["priced_complete"],
+        },
+        "averages": _pace(turns),
+    }
 
 
 def _save_and_score():
@@ -203,7 +323,8 @@ def end_call():
     if not call_log.turns or call_log.saved:
         return {"saved": False, "scorecard": ""}
     result = _save_and_score()
-    return {"saved": True, "call_id": result["call_id"], "scorecard": result["scorecard"]}
+    result["trace"] = trace_snapshot()
+    return result
 
 
 def for_speech(text):
@@ -478,7 +599,6 @@ def _bulbul_body(text, language_code):
         "model": BULBUL_MODEL,
         "speaker": BULBUL_SPEAKER,
         "pace": 1.0,
-        "temperature": 0.6,
         "speech_sample_rate": 22050,
         "output_audio_codec": "wav",
     }
@@ -613,6 +733,17 @@ def _one_offered_place(transcript, line):
     return len(offered) > 1 and len(named) == 1 and named[0] in offered
 
 
+def _purpose_choice(transcript, line):
+    """One side of the purpose question. The whole question still counts as an echo."""
+    low_line = (line or "").lower()
+    if "live in" not in low_line or "investment" not in low_line:
+        return False
+    low = (transcript or "").lower()
+    live = re.search(r"\b(to live|live in|for living|own use|end use)\b", low) is not None
+    invest = re.search(r"\binvestment\b", low) is not None
+    return live != invest
+
+
 def mostly_echo(transcript, line):
     """True when most of the heard words are already in the line just spoken."""
     def words(text):
@@ -622,6 +753,8 @@ def mostly_echo(transcript, line):
     if len(_named_parts(transcript)) == 1:
         return False
     if _one_offered_place(transcript, line):
+        return False
+    if _purpose_choice(transcript, line):
         return False
     said = words(transcript)
     agent = set(words(line))
@@ -672,17 +805,29 @@ async def speak_reply(turn: Turn):
         voice = "neerja"
         if not audio:
             return Response(status_code=502)
-        call_log.note_tts(int((time.perf_counter() - started) * 1000))
-        return Response(content=audio, media_type=media, headers={"X-Voice": voice})
-    call_log.note_tts(int((time.perf_counter() - started) * 1000))
+        return Response(content=audio, media_type=media, headers=_voice_headers(started, voice))
     return StreamingResponse(
         _remaining_chunks(stream, first, pending),
         media_type="audio/wav",
-        headers={
-            "X-Voice": "bulbul-ishita",
-            "X-Audio-Format": "wav",
-        },
+        headers=_voice_headers(started, "bulbul-ishita", {"X-Audio-Format": "wav"}),
     )
+
+
+def _voice_headers(started: float, voice: str, extra: dict | None = None) -> dict:
+    """Name the voice, and the first-clause wait once."""
+    headers = {"X-Voice": voice}
+    if extra:
+        headers.update(extra)
+    elapsed = int((time.perf_counter() - started) * 1000)
+    if call_log.note_tts(elapsed):
+        headers["X-Tts-Ms"] = str(elapsed)
+    latest = call_log.turns[-1] if call_log.turns else None
+    if latest is not None:
+        headers["X-Turn-Cost"] = json.dumps(
+            {"turn_index": latest.get("turn_index"), **_voice_amounts(latest)},
+            separators=(",", ":"),
+        )
+    return headers
 
 
 def clip_has_speech(audio: bytes, min_seconds: float = 0.45) -> bool:

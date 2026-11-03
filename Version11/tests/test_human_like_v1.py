@@ -389,7 +389,7 @@ def test_failed_distance_lookup_does_not_dump_amenities(monkeypatch):
         (
             "What is the exact possession date?",
             "answer_faq",
-            ["confirmed possession"],
+            ["not confirmed", "sales advisor"],
             "answer_faq",
             True,
             0,

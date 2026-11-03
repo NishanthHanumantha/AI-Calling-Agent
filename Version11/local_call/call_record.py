@@ -61,6 +61,7 @@ class CallLog:
         llm_ms: int | None,
         customer: str | None = None,
         card: str | None = None,
+        decision_ms: int | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             stt_ms = None
@@ -81,6 +82,7 @@ class CallLog:
                 "source": label_source(reply, stage, calls, card),
                 "stt_ms": stt_ms,
                 "stt_seconds": stt_seconds,
+                "decision_ms": decision_ms,
                 "llm_ms": llm_ms,
                 "tts_ms": None,
                 "model_calls": calls,
@@ -97,11 +99,14 @@ class CallLog:
         with self._lock:
             self._pending_stt = {"text": text, "stt_ms": stt_ms}
 
-    def note_tts(self, tts_ms: int) -> None:
+    def note_tts(self, tts_ms: int) -> bool:
+        """Store the wait until the first clause can play. Later clauses stay out."""
         with self._lock:
-            if self._awaiting_speech is not None:
-                self._awaiting_speech["tts_ms"] = tts_ms
-                self._awaiting_speech = None
+            if self._awaiting_speech is None:
+                return False
+            self._awaiting_speech["tts_ms"] = tts_ms
+            self._awaiting_speech = None
+            return True
 
     def note_bulbul(self, characters: int) -> None:
         self._add_characters("bulbul_characters", characters)

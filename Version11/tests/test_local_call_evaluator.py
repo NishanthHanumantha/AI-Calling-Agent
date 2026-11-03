@@ -576,7 +576,7 @@ def test_a_no_to_amenities_is_not_a_missed_close():
 def test_speaking_style_follows_the_clause():
     from local_call.server import BULBUL_SPEAKER, speaking_style
 
-    assert BULBUL_SPEAKER == "ishita"
+    assert BULBUL_SPEAKER == "ishita_enhi_customer"
     lines = (
         "Hi, this is Sobha Limited calling.",
         "Thanks for taking the call.",
@@ -1002,6 +1002,20 @@ def test_a_single_part_answer_is_not_an_echo_of_the_area_question():
     assert echo.index("length === 1") < echo.index("0.6")
 
 
+def test_a_live_in_answer_is_not_an_echo_of_the_purpose_question():
+    from local_call.server import mostly_echo
+
+    question = "Are you looking at this to live in, or as an investment?"
+    assert mostly_echo("To live in.", question) is False
+    assert mostly_echo("It's to live in.", question) is False
+    assert mostly_echo("As an investment.", question) is False
+    assert mostly_echo(question, question) is True
+    page = Path(__file__).resolve().parents[1].joinpath("local_call", "index.html").read_text(encoding="utf-8")
+    echo = page[page.index("function isEcho"):page.index("function levelOf")]
+    assert "purposeChoice(transcript, line)" in echo
+    assert echo.index("purposeChoice") < echo.index("0.6")
+
+
 def test_a_single_place_answer_is_not_an_echo_of_the_locality_question():
     from local_call.server import mostly_echo
 
@@ -1277,10 +1291,10 @@ def test_bulbul_speaks_a_wav_the_page_can_decode(monkeypatch):
     assert response.headers["x-audio-format"] == "wav"
     assert response.media_type == "audio/wav"
     assert posted[0]["output_audio_codec"] == "wav"
-    assert posted[0]["speaker"] == "ishita"
-    assert posted[0]["model"] == "bulbul:v3"
+    assert posted[0]["speaker"] == "ishita_enhi_customer"
+    assert posted[0]["model"] == "bulbul:v4-flash"
     assert posted[0]["pace"] == 1.0
-    assert posted[0]["temperature"] == 0.6
+    assert "temperature" not in posted[0]
 
 
 def test_the_whole_wav_is_sent_not_only_the_header(monkeypatch):
