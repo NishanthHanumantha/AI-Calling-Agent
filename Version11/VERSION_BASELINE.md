@@ -1,5 +1,7 @@
 # Version baseline
 
+Version 11 is frozen as of 5 November 2026. Further development belongs in Version 13.
+
 Version: V11 frozen / V12 development
 
 `Version11/` is frozen as of 27 October 2026. It is the all-Sobha Bengaluru call: Sarvam as the caller, Sarvam speech-to-text, Sarvam Bulbul v3 speaker `ishita`, and Neerja only when Bulbul returns no audio. Hindi, Kannada, Tamil, Telugu, and Malayalam stay for the rest of the call once the customer uses them. Each line is spoken as soon as it is ready. Room noise and the agent's own echo are not taken as the customer. A missed voice line does not end the call. Do not modify `Version11/`, `Version10/`, `Version9/`, `Version8/`, `Version7/`, `Version6/`, `Version5/`, `Version4/`, or `Version3/`. Further development, including outbound customer calls, belongs in `Version12/`.
