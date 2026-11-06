@@ -435,8 +435,11 @@ def test_short_noise_is_not_sent_to_stt(monkeypatch):
 def test_a_lone_keyterm_is_not_a_turn(monkeypatch):
     import asyncio
 
+    import app_v3
     from local_call.server import listen, transcript_is_only_keyterms
 
+    app_v3.reset_memory()
+    app_v3.conversation_memory["stage"] = "qualify"
     assert transcript_is_only_keyterms("BHK.") is True
     assert transcript_is_only_keyterms("SOBHA Townpark.") is True
     assert transcript_is_only_keyterms("2 BHK") is False
@@ -953,15 +956,17 @@ def test_translation_waits_two_seconds(monkeypatch):
     assert translate[0]["timeout"] == 2
 
 
-def test_an_echo_of_the_spoken_line_is_not_a_turn(monkeypatch):
+def test_an_echo_of_the_spoken_line_is_not_a_turn(monkeypatch, capsys):
     import asyncio
 
     import app_v3
     from local_call.server import listen, mostly_echo
 
     line = "That is completely fine. Take your time. I can share the available plot details whenever you are ready."
-    assert mostly_echo("Okay, that's fine.", line) is True
+    tail = "I can share the available plot details whenever you are ready."
+    assert mostly_echo("Okay, that's fine.", line) is False
     assert mostly_echo("I would like to know the price.", line) is False
+    assert mostly_echo(tail, line) is True
 
     app_v3.reset_memory()
     app_v3.remember_spoken(line)
@@ -970,7 +975,7 @@ def test_an_echo_of_the_spoken_line_is_not_a_turn(monkeypatch):
         status_code = 200
 
         def json(self):
-            return {"transcript": "Okay, that's fine.", "language_code": "hi-IN"}
+            return {"transcript": tail, "language_code": "hi-IN"}
 
     monkeypatch.setattr("local_call.server.requests.post", lambda *args, **kwargs: _Response())
     monkeypatch.setattr("local_call.server.app_v3.SARVAM_API_KEY", "test")
@@ -981,6 +986,7 @@ def test_an_echo_of_the_spoken_line_is_not_a_turn(monkeypatch):
             return b"x" * 1000
 
     assert asyncio.run(listen(_Upload())) == {"text": ""}
+    assert "DROPPED ECHO:" in capsys.readouterr().out
     assert app_v3.customer_language() == "en-IN"
 
 
@@ -999,7 +1005,7 @@ def test_a_single_part_answer_is_not_an_echo_of_the_area_question():
     page = Path(__file__).resolve().parents[1].joinpath("local_call", "index.html").read_text(encoding="utf-8")
     echo = page[page.index("function isEcho"):page.index("function levelOf")]
     assert "namedParts(transcript).length === 1" in echo
-    assert echo.index("length === 1") < echo.index("0.6")
+    assert echo.index("length === 1") < echo.index("consecutiveCopy")
 
 
 def test_a_live_in_answer_is_not_an_echo_of_the_purpose_question():
@@ -1013,7 +1019,7 @@ def test_a_live_in_answer_is_not_an_echo_of_the_purpose_question():
     page = Path(__file__).resolve().parents[1].joinpath("local_call", "index.html").read_text(encoding="utf-8")
     echo = page[page.index("function isEcho"):page.index("function levelOf")]
     assert "purposeChoice(transcript, line)" in echo
-    assert echo.index("purposeChoice") < echo.index("0.6")
+    assert echo.index("purposeChoice") < echo.index("consecutiveCopy")
 
 
 def test_a_single_place_answer_is_not_an_echo_of_the_locality_question():
@@ -1037,6 +1043,136 @@ def test_a_single_place_answer_is_not_an_echo_of_the_locality_question():
     echo = page[page.index("function isEcho"):page.index("function levelOf")]
     assert "namedPlaces(transcript)" in echo
     assert "offered.length > 1" in echo
+
+
+def test_a_bedroom_answer_and_cover_both_are_not_echoes():
+    from local_call.server import mostly_echo
+
+    configuration = "May I know which configuration you are interested in?"
+    assert mostly_echo("I am interested in 3 BHK.", configuration) is False
+    assert mostly_echo("3 BHK.", configuration) is False
+    assert mostly_echo(configuration, configuration) is True
+
+    offer = (
+        "SOBHA Neopolis and SOBHA Ayana, both at Panathur start from INR 2.3 Crore. "
+        "Which one shall I tell you about, or shall I cover both?"
+    )
+    assert mostly_echo("You can cover both.", offer) is False
+    assert mostly_echo("cover both.", offer) is False
+    assert mostly_echo(offer, offer) is True
+    page = Path(__file__).resolve().parents[1].joinpath("local_call", "index.html").read_text(encoding="utf-8")
+    echo = page[page.index("function isEcho"):page.index("function levelOf")]
+    assert "bedroomChoice" in echo
+    assert "bothChoice" in echo
+    assert echo.index("bedroomChoice") < echo.index("consecutiveCopy")
+    assert echo.index("bothChoice") < echo.index("consecutiveCopy")
+
+
+def test_a_lone_bhk_is_kept_only_for_the_configuration_question():
+    import app_v3
+    from local_call.server import transcript_is_only_keyterms
+
+    app_v3.reset_memory()
+    assert transcript_is_only_keyterms("BHK.") is True
+    app_v3.conversation_memory["last_agent_question"] = (
+        "May I know which configuration you are interested in?"
+    )
+    assert transcript_is_only_keyterms("BHK.") is False
+    assert transcript_is_only_keyterms("SOBHA.") is True
+    app_v3.conversation_memory["last_agent_question"] = (
+        "Which one shall I tell you about, or shall I cover both?"
+    )
+    assert transcript_is_only_keyterms("BHK.") is True
+
+
+def test_the_both_question_boosts_the_two_projects_not_bhoganahalli():
+    import app_v3
+    from local_call.server import stt_keyterms
+
+    app_v3.reset_memory()
+    app_v3.conversation_memory.update({
+        "customer_part": "East",
+        "pending_project_ids": ["sobha-neopolis", "sobha-ayana"],
+        "last_agent_question": "Which one shall I tell you about, or shall I cover both?",
+    })
+    terms = stt_keyterms()
+    assert app_v3.catalog.BY_ID["sobha-neopolis"]["spoken"] in terms
+    assert app_v3.catalog.BY_ID["sobha-ayana"]["spoken"] in terms
+    assert "both" in terms
+    for place in ("Bhoganahalli", "Whitefield", "Panathur", "Sarjapur", "Koramangala"):
+        assert place not in terms
+
+
+def test_an_open_project_question_boosts_ayana_not_sobha(monkeypatch):
+    import asyncio
+
+    import app_v3
+    from local_call.server import listen, stt_keyterms, transcript_is_only_keyterms
+
+    app_v3.reset_memory()
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "customer_part": "East",
+        "pending_project_ids": ["sobha-neopolis", "sobha-ayana"],
+        "active_project_ids": ["sobha-neopolis", "sobha-ayana"],
+        "last_agent_question": "Would you like to know anything else about the projects?",
+    })
+    terms = stt_keyterms()
+    assert "Neopolis" in terms
+    assert "Ayana" in terms
+    for blocked in ("SOBHA", "BHK", "Bhoganahalli", "Panathur"):
+        assert blocked not in terms
+    assert transcript_is_only_keyterms("SOBHA.") is True
+    assert transcript_is_only_keyterms("SOBHA, BHK.") is True
+    assert transcript_is_only_keyterms("the amenities of SOBHA Ayana") is False
+
+    spoken = {"text": "SOBHA, BHK."}
+
+    class _Response:
+        status_code = 200
+
+        def json(self):
+            return {"transcript": spoken["text"], "language_code": "en-IN"}
+
+    monkeypatch.setattr("local_call.server.requests.post", lambda *args, **kwargs: _Response())
+    monkeypatch.setattr("local_call.server.app_v3.SARVAM_API_KEY", "test")
+    monkeypatch.setattr("local_call.server.clip_has_speech", lambda audio, min_seconds=0.45: True)
+
+    class _Upload:
+        async def read(self):
+            return b"x" * 1000
+
+    assert asyncio.run(listen(_Upload())) == {"text": ""}
+    spoken["text"] = "Can you tell me about SOBHA Ayana?"
+    assert asyncio.run(listen(_Upload())) == {"text": "Can you tell me about SOBHA Ayana?"}
+
+
+def test_the_greeting_does_not_turn_noise_into_a_bhk_answer():
+    import app_v3
+    from local_call.server import mostly_echo, stt_keyterms, unanswered_greeting
+
+    greeting = (
+        "Hi, this is Sobha Limited calling. I'm getting in touch about our residential "
+        "projects in Bengaluru. Is now a good time for a quick call?"
+    )
+    heard = (
+        "Hi, this is Sobha Limited calling. I am getting in touch about our residential "
+        "projects in Bengaluru. Is now a good time for a quick call?"
+    )
+    assert mostly_echo(heard, greeting) is True
+    assert mostly_echo("Yes.", greeting) is False
+    assert mostly_echo("Yeah, I can speak now.", greeting) is False
+
+    app_v3.reset_memory()
+    app_v3.conversation_memory["last_agent_question"] = "Is now a good time for a quick call?"
+    assert stt_keyterms() == "[]"
+    noise = "BHK is leading in at close with the building places over 5 to 10 years."
+    assert unanswered_greeting(noise) is True
+    assert unanswered_greeting("Yes.") is False
+    assert unanswered_greeting("Yeah, I can speak now.") is False
+    assert unanswered_greeting("Who is this?") is False
+    app_v3.conversation_memory["stage"] = "qualify"
+    assert unanswered_greeting(noise) is False
 
 
 def test_a_short_english_detection_stays_in_the_chosen_language():
@@ -1564,6 +1700,70 @@ def test_an_east_place_question_boosts_panathur_not_townpark():
     assert "Townpark" in stt_keyterms()
 
 
+def test_a_yes_to_altair_is_not_heard_as_bhoganahalli(monkeypatch):
+    import asyncio
+
+    import app_v3
+    from local_call.server import listen, stt_keyterms, transcript_is_only_keyterms
+
+    app_v3.reset_memory()
+    app_v3.conversation_memory.update({
+        "stage": "qualify",
+        "customer_part": "East",
+        "customer_place": "Sarjapur",
+        "pending_project_ids": ["sobha-altair"],
+        "last_agent_question": "Would you be interested to know about the project?",
+    })
+    terms = stt_keyterms()
+    assert "Altair" in terms
+    assert "yes" in terms
+    assert "sure" in terms
+    for blocked in ("Bhoganahalli", "Whitefield", "Panathur", "SOBHA", "BHK"):
+        assert blocked not in terms
+    assert transcript_is_only_keyterms("Bhoganahalli.") is True
+    assert transcript_is_only_keyterms("Ya sure.") is False
+
+    place = (
+        "Are you looking closer to Whitefield, Panathur, Sarjapur, "
+        "Koramangala, or Bhoganahalli?"
+    )
+    app_v3.conversation_memory["last_agent_question"] = place
+    listed = stt_keyterms()
+    assert "Bhoganahalli" in listed
+    assert transcript_is_only_keyterms("Bhoganahalli.") is False
+
+    app_v3.conversation_memory["last_agent_question"] = (
+        "Are you looking at this to live in, or as an investment?"
+    )
+    purpose = stt_keyterms()
+    assert "investment" in purpose
+    assert "SOBHA" not in purpose
+    assert "Bhoganahalli" not in purpose
+
+    app_v3.conversation_memory["last_agent_question"] = (
+        "Would you be interested to know about the project?"
+    )
+    spoken = {"text": "Bhoganahalli."}
+
+    class _Response:
+        status_code = 200
+
+        def json(self):
+            return {"transcript": spoken["text"], "language_code": "en-IN"}
+
+    monkeypatch.setattr("local_call.server.requests.post", lambda *args, **kwargs: _Response())
+    monkeypatch.setattr("local_call.server.app_v3.SARVAM_API_KEY", "test")
+    monkeypatch.setattr("local_call.server.clip_has_speech", lambda audio, min_seconds=0.45: True)
+
+    class _Upload:
+        async def read(self):
+            return b"x" * 1000
+
+    assert asyncio.run(listen(_Upload())) == {"text": ""}
+    spoken["text"] = "Ya sure."
+    assert asyncio.run(listen(_Upload())) == {"text": "Ya sure."}
+
+
 def test_the_part_question_boosts_west_bengaluru_not_whitefield():
     import app_v3
     from local_call.server import stt_keyterms
@@ -1584,16 +1784,16 @@ def test_the_part_question_boosts_west_bengaluru_not_whitefield():
         "last_agent_question": "May I know which configuration you are interested in?",
     })
     east_terms = stt_keyterms()
-    assert "Whitefield" in east_terms
-    assert "Panathur" in east_terms
+    assert "Whitefield" not in east_terms
+    assert "Panathur" not in east_terms
+    assert "Bhoganahalli" not in east_terms
     assert "Electronic City" not in east_terms
-    assert "Hosur Road" not in east_terms
 
     app_v3.conversation_memory.update({
         "customer_part": "South",
         "last_agent_question": "May I know which configuration you are interested in?",
     })
     south_terms = stt_keyterms()
-    assert "Electronic City" in south_terms
-    assert "Hosur Road" in south_terms
+    assert "Electronic City" not in south_terms
+    assert "Hosur Road" not in south_terms
     assert "Whitefield" not in south_terms

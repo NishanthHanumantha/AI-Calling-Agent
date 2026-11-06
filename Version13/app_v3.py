@@ -2264,20 +2264,26 @@ def topic_of_text(text):
     return None
 
 
+def _amenities_come_from_brochure():
+    """Townpark amenities stay written. Every other focused project uses its brochure."""
+    ids = conversation_memory.get("active_project_ids") or []
+    focus = [catalog.BY_ID[item] for item in ids if item in catalog.BY_ID]
+    if not focus:
+        return False
+    return not (len(focus) == 1 and focus[0]["id"] == "sobha-townpark")
+
+
 def fact_for_offered_topic(topic):
     """The stored project fact for a topic the customer agreed to hear."""
     ids = conversation_memory.get("active_project_ids") or []
     focus = [catalog.BY_ID[item] for item in ids if item in catalog.BY_ID]
+    if topic == "amenities" and _amenities_come_from_brochure():
+        return None
     if len(focus) > 1 or (focus and focus[0]["id"] != "sobha-townpark"):
         if topic == "home":
             return " ".join(f"{project['spoken']} is {project['theme']}." for project in focus)
         if topic == "price":
             return price_statement()
-        if topic == "amenities":
-            return " ".join(
-                f"Our sales team can share the latest amenities for {project['spoken']}."
-                for project in focus
-            )
         if topic == "location":
             return catalog.location_line(focus, name_projects=True)
     if topic == "home":
@@ -2311,6 +2317,16 @@ def reply_for_accepted_topic(user_text):
         conversation_memory["stage"] = "answer_faq"
         conversation_memory["awaiting_visit_decision"] = False
         return payment_and_open()
+    if topic == "amenities" and _amenities_come_from_brochure():
+        conversation_memory["stage"] = "answer_faq"
+        conversation_memory["awaiting_visit_decision"] = False
+        answer = (grounded_reply(user_text) or "").strip()
+        if not answer:
+            return None
+        remember_covered("amenities")
+        if "?" in answer:
+            return answer
+        return follow_on(answer)
     fact = fact_for_offered_topic(topic)
     if not fact:
         return None
@@ -2378,6 +2394,8 @@ def acknowledge_open(topic):
 
 def reply_for_open_answer(user_text):
     """Acknowledge an open answer before the model writes a reply. None when the model should answer."""
+    if asks_about_an_amenity(user_text):
+        return None
     if leaves_any_configuration(user_text):
         remember_open("configuration")
         lead = "That's alright, we can leave the configuration open."
@@ -3160,6 +3178,14 @@ def grounded_reply(user_text):
     note_customer_requirements(user_text)
     intent = turn_intent(user_text)
     conversation_memory["last_intent"] = intent
+    if intent == "amenities" and _amenities_come_from_brochure():
+        focus = [
+            catalog.BY_ID[item]
+            for item in (conversation_memory.get("active_project_ids") or [])
+            if item in catalog.BY_ID
+        ]
+        if focus:
+            _load_focus_brochures(focus)
     brochure_context, top_score = retrieve_context(intent, turn_query(user_text))
     return generate_response(user_text, intent, brochure_context, top_score)
 
@@ -3687,6 +3713,8 @@ def _pair_brief(projects):
 
 def _unsure_before_the_brief(user_text):
     """They do not know what to ask, and the themes have not been spoken."""
+    if asks_about_an_amenity(user_text):
+        return False
     if len(conversation_memory.get("active_project_ids") or []) < 2:
         return False
     if conversation_memory.get("pair_overview_spoken"):
@@ -3767,6 +3795,8 @@ def reply_from_active_cards(user_text):
     intent = detect_intent(user_text)
     if intent not in ("location", "floorplan", "pricing", "amenities"):
         return None
+    if intent == "amenities":
+        return None
     if not is_new_faq_question(user_text) and intent == "general":
         return None
     if intent == "pricing":
@@ -3776,12 +3806,9 @@ def reply_from_active_cards(user_text):
         body = _location_reply(user_text)
         label = "location"
     else:
-        body = answer_from_kb(intent)
-        label = "size" if intent == "floorplan" else "amenities"
-        if intent == "floorplan":
-            remember_covered("home")
-        elif intent == "amenities":
-            remember_covered("amenities")
+        body = answer_from_kb("floorplan")
+        label = "size"
+        remember_covered("home")
     if not body:
         return None
     if len(focus) > 1 and "?" not in body:

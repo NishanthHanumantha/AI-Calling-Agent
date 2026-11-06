@@ -316,6 +316,50 @@
       return live !== invest;
     }
 
+    function shortChoice(said, agent) {
+      return said.length > 0 && said.length <= 6 && said.join(" ") !== agent.join(" ");
+    }
+
+    function bedroomChoice(transcript, said, agent) {
+      if (!shortChoice(said, agent)) return false;
+      return /\b([1-4]|one|two|three|four)\s*-?\s*(?:bhk|bedroom)s?\b/.test((transcript || "").toLowerCase());
+    }
+
+    function bothChoice(transcript, line, said, agent) {
+      if (!(line || "").toLowerCase().includes("both") || !shortChoice(said, agent)) return false;
+      return /\bboth\b/.test((transcript || "").toLowerCase());
+    }
+
+    function followsSpokenLine(said, agent) {
+      if (said.length <= 6 || agent.length < 8) return false;
+      let matched = 0;
+      let pos = 0;
+      for (const word of said) {
+        let found = pos;
+        while (found < agent.length && agent[found] !== word) found += 1;
+        if (found >= agent.length) continue;
+        matched += 1;
+        pos = found + 1;
+      }
+      return matched >= 8 && matched / said.length >= 0.75;
+    }
+
+    function consecutiveCopy(said, agent) {
+      if (said.length < 2 || agent.length < 2) return false;
+      const span = said.length;
+      for (let start = 0; start <= agent.length - span; start += 1) {
+        let same = true;
+        for (let offset = 0; offset < span; offset += 1) {
+          if (agent[start + offset] !== said[offset]) {
+            same = false;
+            break;
+          }
+        }
+        if (same) return true;
+      }
+      return false;
+    }
+
     function isEcho(transcript, line) {
       if (namedParts(transcript).length === 1) return false;
       const chosen = namedPlaces(transcript);
@@ -323,10 +367,13 @@
       if (chosen.length === 1 && offered.length > 1 && offered.includes(chosen[0])) return false;
       if (purposeChoice(transcript, line)) return false;
       const said = spokenWords(transcript);
-      const agent = new Set(spokenWords(line));
-      if (said.length < 2 || agent.size === 0) return false;
-      const shared = said.filter((word) => agent.has(word)).length;
-      return shared / said.length >= 0.6;
+      const agent = spokenWords(line);
+      if (bedroomChoice(transcript, said, agent)) return false;
+      if (bothChoice(transcript, line, said, agent)) return false;
+      if (said.length < 2 || agent.length === 0) return false;
+      if (followsSpokenLine(said, agent)) return true;
+      if (said.some((word) => !agent.includes(word))) return false;
+      return consecutiveCopy(said, agent);
     }
 
     function levelOf(channel, sampleRate) {

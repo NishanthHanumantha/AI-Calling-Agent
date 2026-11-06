@@ -2514,6 +2514,52 @@ def test_naangur_asks_for_a_repeat():
     assert "metro" not in spoken.lower()
 
 
+def test_neopolis_and_ayana_amenities_come_from_the_brochure():
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "catalog_flow": True,
+        "catalog_done": True,
+        "active_project_ids": ["sobha-neopolis", "sobha-ayana"],
+        "last_agent_question": "Would you like to know anything else about the projects?",
+    })
+    spoken, _, _stage = _turn(
+        "I don't know, can you let me know about the amenities of the projects?"
+    )
+    low = spoken.lower()
+    assert "that's alright" not in low
+    assert "don't have that detail" not in low
+    assert "sales team can share the latest amenities" not in low
+    assert CALLS
+    prompt = CALLS[0]["json"]["messages"][1]["content"]
+    assert "Brochure excerpts:" in prompt
+    assert "SOBHA Neopolis" in prompt
+    assert "SOBHA Ayana" in prompt
+
+
+def test_townpark_amenities_stay_written_and_neopolis_price_stays_on_the_card():
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "active_project_ids": ["sobha-townpark"],
+        "last_agent_question": "Would you like to hear about the amenities?",
+    })
+    spoken, _, _stage = _turn("Yes.")
+    assert CALLS == []
+    assert "clubhouses, swimming pools, sports courts" in spoken.lower()
+
+    CALLS.clear()
+    app_v3.reset_memory()
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "catalog_done": True,
+        "active_project_ids": ["sobha-neopolis"],
+        "last_agent_question": "What would you like to know about it?",
+    })
+    spoken, _, _stage = _turn("What is the price?")
+    assert CALLS == []
+    assert "SOBHA Neopolis" in spoken
+    assert "INR 2.3 Crore" in spoken
+
+
 def test_an_unsure_reply_after_both_projects_asks_what_else():
     app_v3.conversation_memory.update({
         "stage": "answer_faq",

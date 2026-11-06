@@ -744,24 +744,82 @@ def _purpose_choice(transcript, line):
     return live != invest
 
 
-def mostly_echo(transcript, line):
-    """True when most of the heard words are already in the line just spoken."""
-    def words(text):
-        raw = re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())
-        return [word for word in raw.split() if len(word) > 1]
+def _heard_words(text):
+    raw = re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())
+    return [word for word in raw.split() if len(word) > 1]
 
+
+def _short_choice(said, agent):
+    """A brief answer, not the line just spoken."""
+    return 0 < len(said) <= 6 and said != agent
+
+
+def _bedroom_choice(transcript, said, agent):
+    """A bedroom count. The configuration question itself is still an echo."""
+    if not _short_choice(said, agent):
+        return False
+    return re.search(
+        r"\b([1-4]|one|two|three|four)\s*-?\s*(?:bhk|bedroom)s?\b",
+        (transcript or "").lower(),
+    ) is not None
+
+
+def _both_choice(transcript, line, said, agent):
+    """Accepting both offered projects. The offer sentence itself is still an echo."""
+    if "both" not in (line or "").lower() or not _short_choice(said, agent):
+        return False
+    return re.search(r"\bboth\b", (transcript or "").lower()) is not None
+
+
+def _consecutive_copy(said, agent):
+    """True when the heard words are a consecutive run of the spoken line."""
+    if len(said) < 2 or len(agent) < 2:
+        return False
+    span = len(said)
+    for start in range(len(agent) - span + 1):
+        if agent[start:start + span] == said:
+            return True
+    return False
+
+
+def _follows_spoken_line(said, agent):
+    """A long clip that tracks the spoken line, allowing a few extra words."""
+    if len(said) <= 6 or len(agent) < 8:
+        return False
+    matched = 0
+    pos = 0
+    for word in said:
+        found = pos
+        while found < len(agent) and agent[found] != word:
+            found += 1
+        if found >= len(agent):
+            continue
+        matched += 1
+        pos = found + 1
+    return matched >= 8 and matched / len(said) >= 0.75
+
+
+def mostly_echo(transcript, line):
+    """True when the clip is a consecutive copy of the line just spoken."""
     if len(_named_parts(transcript)) == 1:
         return False
     if _one_offered_place(transcript, line):
         return False
     if _purpose_choice(transcript, line):
         return False
-    said = words(transcript)
-    agent = set(words(line))
+    said = _heard_words(transcript)
+    agent = _heard_words(line)
+    if _bedroom_choice(transcript, said, agent):
+        return False
+    if _both_choice(transcript, line, said, agent):
+        return False
     if len(said) < 2 or not agent:
         return False
-    shared = sum(1 for word in said if word in agent)
-    return shared / len(said) >= 0.6
+    if _follows_spoken_line(said, agent):
+        return True
+    if any(word not in agent for word in said):
+        return False
+    return _consecutive_copy(said, agent)
 
 
 async def neerja_audio(text):
@@ -863,34 +921,74 @@ def clip_has_speech(audio: bytes, min_seconds: float = 0.45) -> bool:
     return (loud * frame_n / rate) >= min_seconds
 
 
+def _offered_project_names():
+    """The project just offered, without the SOBHA prefix."""
+    memory = app_v3.conversation_memory
+    ids = memory.get("pending_project_ids") or memory.get("active_project_ids") or []
+    names = []
+    for item in ids:
+        project = app_v3.catalog.BY_ID.get(item)
+        spoken = (project or {}).get("spoken") or ""
+        short = re.sub(r"^SOBHA\s+", "", spoken, flags=re.I).strip()
+        if short and short not in names:
+            names.append(short)
+    return names
+
+
+def _yes_no_kind(question):
+    """A question waiting for yes or no, not for a place."""
+    low = (question or "").lower()
+    if "interested to know about the project" in low:
+        return "interest"
+    if "live in" in low and "investment" in low:
+        return "purpose"
+    if "site visit" in low:
+        return "visit"
+    return ""
+
+
 def stt_keyterms():
-    """Boost the places just asked. Townpark is boosted only for a South call."""
+    """Boost the words the open question is waiting for."""
     memory = app_v3.conversation_memory
     last = memory.get("last_agent_question") or ""
-    offered = app_v3.catalog.places_mentioned(last) if "closer to" in last.lower() else []
-    terms = ["SOBHA", "BHK"]
     low = last.lower()
-    part_question = "part of bengaluru" in low or "which part" in low
-    if offered:
-        terms.extend(offered)
-    elif part_question:
-        terms.extend(["Bengaluru", "Bangalore", "North", "East", "South", "West"])
-    elif memory.get("customer_part") == "East":
-        terms.extend(["Whitefield", "Panathur", "Sarjapur", "Koramangala", "Bhoganahalli"])
-    elif memory.get("customer_part") == "South":
-        terms.extend(["Electronic City", "Hosur Road", "Bannerghatta", "Banashankari"])
-    south_places = {"electronic city", "bannerghatta", "banashankari"}
-    east_places = {"panathur", "whitefield", "sarjapur", "koramangala", "bhoganahalli"}
-    south_question = bool(offered) and any(place.lower() in south_places for place in offered) and not any(
-        place.lower() in east_places for place in offered
-    )
-    if (
-        "sobha-townpark" in (memory.get("active_project_ids") or [])
-        or memory.get("customer_part") == "South"
-        or south_question
-        or "townpark" in last.lower()
-    ):
-        terms.append("Townpark")
+    if memory.get("stage") == "greeting" and ("good time" in low or "quick call" in low):
+        return "[]"
+    kind = _yes_no_kind(last)
+    if kind == "interest":
+        terms = ["yes", "sure", "yeah", *_offered_project_names()]
+    elif kind == "purpose":
+        terms = ["live", "investment"]
+    elif kind == "visit":
+        terms = ["yes", "sure", "yeah", *_offered_project_names()]
+    else:
+        offered = app_v3.catalog.places_mentioned(last) if "closer to" in low else []
+        terms = ["SOBHA", "BHK"]
+        part_question = "part of bengaluru" in low or "which part" in low
+        if offered:
+            terms.extend(offered)
+        elif part_question:
+            terms.extend(["Bengaluru", "Bangalore", "North", "East", "South", "West"])
+        elif "cover both" in low or "which one shall i" in low:
+            for item in (memory.get("pending_project_ids") or []):
+                project = app_v3.catalog.BY_ID.get(item)
+                if project and project.get("spoken"):
+                    terms.append(project["spoken"])
+            terms.append("both")
+        elif _offered_project_names() and not _configuration_question_open():
+            terms = list(_offered_project_names())
+        south_places = {"electronic city", "bannerghatta", "banashankari"}
+        east_places = {"panathur", "whitefield", "sarjapur", "koramangala", "bhoganahalli"}
+        south_question = bool(offered) and any(place.lower() in south_places for place in offered) and not any(
+            place.lower() in east_places for place in offered
+        )
+        if (
+            "sobha-townpark" in (memory.get("active_project_ids") or [])
+            or memory.get("customer_part") == "South"
+            or south_question
+            or "townpark" in last.lower()
+        ):
+            terms.append("Townpark")
     seen = []
     for term in terms:
         if term not in seen:
@@ -908,16 +1006,59 @@ BOOSTED_KEYTERMS = (
 )
 
 
+def _configuration_question_open():
+    last = (app_v3.conversation_memory.get("last_agent_question") or "").lower()
+    return re.search(r"which configuration|one, two, three|bhk homes", last) is not None
+
+
+def _only_a_place_or_brand(raw):
+    """True when nothing is left after the place names and SOBHA."""
+    remaining = raw
+    for place in app_v3.catalog.places_mentioned(raw):
+        remaining = re.sub(rf"\b{re.escape(place.lower())}\b", " ", remaining)
+    remaining = re.sub(r"\bsobha\b", " ", remaining)
+    remaining = re.sub(r"\s+", " ", remaining).strip()
+    named = bool(app_v3.catalog.places_mentioned(raw)) or "sobha" in raw
+    return named and re.search(r"[a-z0-9]", remaining) is None
+
+
 def transcript_is_only_keyterms(text):
     """A clip that comes back as only a boosted word was not an answer."""
     raw = re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())
     raw = re.sub(r"\s+", " ", raw).strip()
     if not raw:
         return False
+    if _yes_no_kind(app_v3.conversation_memory.get("last_agent_question")) and _only_a_place_or_brand(raw):
+        return True
     remaining = raw
     for term in BOOSTED_KEYTERMS:
         remaining = re.sub(rf"\b{re.escape(term)}\b", " ", remaining)
-    return re.search(r"[a-z0-9]", remaining) is None
+    if re.search(r"[a-z0-9]", remaining):
+        return False
+    return not (raw == "bhk" and _configuration_question_open())
+
+
+def unanswered_greeting(text):
+    """Noise at the greeting is not a turn. A yes, a no, or a question still is."""
+    if app_v3.conversation_memory.get("stage") != "greeting":
+        return False
+    if re.search(r"\b(?:who|why|what|how)\b|\?", text or "", re.I):
+        return False
+    if app_v3._asks_to_change_language(text):
+        return False
+    if app_v3.wants_a_callback(text) or app_v3.asks_to_call_later(text):
+        return False
+    if (
+        app_v3.is_positive(text)
+        or app_v3.available_to_talk(text)
+        or app_v3.agrees_to_talk_now(text)
+    ):
+        return False
+    if app_v3.is_a_hold(text) or app_v3.is_clear_negative(text) or app_v3.greeting_starts_with_no(text):
+        return False
+    if app_v3.catalog.project_named_in(text):
+        return False
+    return True
 
 
 def transcribe_clip(audio: bytes, heard: str = "1") -> dict:
@@ -954,6 +1095,10 @@ def transcribe_clip(audio: bytes, heard: str = "1") -> dict:
     if transcript_is_only_keyterms(transcript):
         return {"text": ""}
     if mostly_echo(transcript, app_v3.conversation_memory.get("last_spoken_reply")):
+        print("DROPPED ECHO:", transcript, flush=True)
+        return {"text": ""}
+    if unanswered_greeting(transcript):
+        print("DROPPED GREETING:", transcript, flush=True)
         return {"text": ""}
     if str(heard) == "0" and lone_yes(transcript):
         return {"text": ""}
