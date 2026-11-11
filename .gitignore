@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 .env
 venv/
+
+# Cursor command wrappers. They snapshot the process environment.
+ps-script-*.ps1
+ps-state-out-*.txt

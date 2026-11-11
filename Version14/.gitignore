@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+venv/
+.pytest_cache/
+local_call/runs/*
+!local_call/runs/.gitkeep

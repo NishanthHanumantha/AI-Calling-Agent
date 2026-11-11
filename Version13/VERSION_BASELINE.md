@@ -1,8 +1,10 @@
 # Version baseline
 
-Version: V11 frozen / V13 development
+Version 13 is frozen as of 11 November 2026. Further development belongs in Version 14.
 
-`Version13/` is the development copy. `Version11/`, `Version12/`, `Version10/`, `Version9/`, `Version8/`, `Version7/`, `Version6/`, `Version5/`, `Version4/`, and `Version3/` stay frozen.
+Version: V13 frozen / V14 development
+
+`Version13/` is frozen. `Version11/`, `Version12/`, `Version10/`, `Version9/`, `Version8/`, `Version7/`, `Version6/`, `Version5/`, `Version4/`, and `Version3/` stay frozen.
 
 Copied from `Version11/` on 5 November 2026, and only what the localhost call needs:
 
