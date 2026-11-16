@@ -155,6 +155,29 @@ def test_customer_audio_is_sent_to_saaras(monkeypatch):
     assert any(item["event"] == "media" for item in sent)
 
 
+def test_the_dialed_number_is_kept_after_the_greeting_reset(monkeypatch):
+    from local_call.phone import dialed_from_query
+
+    assert dialed_from_query({"dialed": "+910000000009"}) == "+910000000009"
+    assert dialed_from_query(None) == ""
+    _patch_voice(monkeypatch, "")
+
+    async def run():
+        async def send(raw):
+            return None
+
+        session = PhoneSession(send=send, scorer=lambda log: None)
+        session.dialed_number = "+910000000009"
+        try:
+            await session.on_message(_start_message())
+            await session.idle()
+            return app_v3.conversation_memory["dialed_number"]
+        finally:
+            await session.finish()
+
+    assert asyncio.run(run()) == "+910000000009"
+
+
 def test_agreeing_to_talk_asks_the_area_and_not_the_greeting_again(monkeypatch):
     call_log.begin()
     _patch_voice(monkeypatch, "Yeah, you can tell me now")
@@ -176,7 +199,8 @@ def test_agreeing_to_talk_asks_the_area_and_not_the_greeting_again(monkeypatch):
     greeting, reply = asyncio.run(run())
     assert "good time" in greeting.lower()
     assert "good time" not in reply.lower()
-    assert "which part of bengaluru" in reply.lower()
+    assert "may i have your name" in reply.lower()
+    assert "which part of bengaluru" not in reply.lower()
     assert app_v3.conversation_memory["stage"] == "qualify"
 
 
@@ -273,7 +297,8 @@ def test_speech_during_a_hold_cancels_the_quiet(monkeypatch):
     replies, finished = asyncio.run(run())
     assert finished
     assert replies[1] == "Sure, I will wait."
-    assert "which part of bengaluru" in replies[-1].lower()
+    assert "may i have your name" in replies[-1].lower()
+    assert "which part of bengaluru" not in replies[-1].lower()
     assert sum("good time" in reply.lower() for reply in replies) == 1
 
 
@@ -320,7 +345,11 @@ def test_the_singapore_dial_uses_api_exotel_and_stays_quiet_without_a_poster(tmp
     assert form["CallerId"] == "01140000000"
     assert form["StreamType"] == "bidirectional"
     assert form["Record"] == "false"
-    assert form["StreamUrl"].endswith("/exotel/media?sample-rate=16000")
+    assert "sample-rate=16000" in form["StreamUrl"]
+    parsed = form["StreamUrl"].split("?", 1)[1]
+    fields = dict(part.split("=", 1) for part in parsed.split("&"))
+    assert fields["dialed"] == "%2B910000000001"
+    assert "01140000000" not in form["StreamUrl"]
     assert used_auth == auth
     assert timeout == 30
 

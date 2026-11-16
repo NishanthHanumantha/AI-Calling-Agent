@@ -197,12 +197,21 @@ class SpeechEar:
         return ("utterance", wav)
 
 
+def dialed_from_query(params) -> str:
+    """The number this call dialed. A browser socket has none."""
+    if params is None:
+        return ""
+    return str(params.get("dialed") or "").strip()
+
+
 def score_phone_call(log) -> None:
     from local_call.evaluate import evaluate_saved_call
+    from local_call.sales_sheet import record_finished_call
     from local_call.server import RUNS, project_facts
 
     record = log.as_dict()
     log.save(RUNS)
+    record_finished_call(record["call_id"], record["started_at"])
     evaluate_saved_call(record, RUNS, project_facts(record))
 
 
@@ -219,6 +228,7 @@ class PhoneSession:
         self.stopped = False
         self.closed = False
         self.scorer = scorer
+        self.dialed_number = ""
         self.task = None
         self.hold_task = None
         self.ignore_samples = 0
@@ -251,6 +261,8 @@ class PhoneSession:
         if call_log.turns and not call_log.saved:
             _save_and_score()
         response = await app_v3.voice()
+        if self.dialed_number:
+            app_v3.conversation_memory["dialed_number"] = self.dialed_number
         call_log.begin()
         payload = payload_from(response)
         call_log.add_reply(payload["reply"], payload["stage"], None)
@@ -390,6 +402,7 @@ async def phone_socket(socket) -> None:
         except ValueError:
             rate = 8000
     session = PhoneSession(send=socket.send_text, rate=rate, scorer=score_phone_call)
+    session.dialed_number = dialed_from_query(getattr(socket, "query_params", None))
     try:
         while not session.closed:
             await session.on_message(await socket.receive_text())

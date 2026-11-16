@@ -521,7 +521,8 @@ def test_greeting_asks_configuration_not_area():
     app_v3.conversation_memory["stage"] = "greeting"
     spoken, _, stage = _turn("Yes, this is a good time.")
     assert stage == "qualify"
-    assert "part of bengaluru" in spoken.lower()
+    assert "may i have your name" in spoken.lower()
+    assert "part of bengaluru" not in spoken.lower()
     assert "townpark" not in spoken.lower()
     assert "which area" not in spoken.lower()
     assert "amenities, pricing" not in spoken.lower()
@@ -532,7 +533,8 @@ def test_greeting_accepts_available_without_yes():
     app_v3.conversation_memory["stage"] = "greeting"
     spoken, _, stage = _turn("I can speak now.")
     assert stage == "qualify"
-    assert "part of bengaluru" in spoken.lower()
+    assert "may i have your name" in spoken.lower()
+    assert "part of bengaluru" not in spoken.lower()
     assert "lovely day" not in spoken.lower()
     assert CALLS == []
 
@@ -543,9 +545,13 @@ def test_you_can_tell_me_now_leaves_the_greeting():
     assert CALLS == []
     assert stage == "qualify"
     low = spoken.lower()
-    assert "part of bengaluru" in low
+    assert "may i have your name" in low
     assert "good time" not in low
     assert low.count("?") == 1
+    spoken, _, stage = _turn("Nishanth")
+    assert CALLS == []
+    assert "okay nishanth" in spoken.lower()
+    assert "part of bengaluru" in spoken.lower()
     spoken, _, stage = _turn("I'm not sure like where I'm looking.")
     assert CALLS == []
     assert stage == "qualify"
@@ -657,7 +663,8 @@ def test_busy_or_call_later_asks_once_for_a_time():
     spoken, _, stage = _turn("I can talk now.")
     assert stage == "qualify"
     assert CALLS == []
-    assert "part of bengaluru" in spoken.lower()
+    assert "may i have your name" in spoken.lower()
+    assert "part of bengaluru" not in spoken.lower()
     assert app_v3.conversation_memory["callback_when"] is None
 
 
@@ -2077,7 +2084,7 @@ _VISIT = {
 @pytest.mark.parametrize(
     ("stage", "speech", "prepare", "expect_stage", "needle", "marker"),
     [
-        ("greeting", "Yes.", {}, "qualify", "part of bengaluru", ""),
+        ("greeting", "Yes.", {}, "qualify", "may i have your name", ""),
         ("greeting", "Not now.", {}, "closed", "lovely day", ""),
         (
             "greeting",
@@ -2140,12 +2147,69 @@ def test_naming_townpark_locks_that_project():
     app_v3.conversation_memory.update({"stage": "greeting"})
     spoken, _, stage = _turn("Yes, tell me about Townpark.")
     assert CALLS == []
+    assert stage == "qualify"
+    assert "may i have your name" in spoken.lower()
+    assert "townpark" not in spoken.lower()
+    spoken, _, stage = _turn("Nishanth")
+    assert CALLS == []
+    assert "okay nishanth" in spoken.lower()
     assert "stay with sobha townpark" in spoken.lower()
     assert "live in" in spoken.lower()
     spoken, _, stage = _turn("It is for my own use.")
     assert stage == "answer_faq"
     assert "1.65 crore" in spoken.lower()
     assert "10:00" not in spoken.lower()
+    assert app_v3.conversation_memory["customer_name"] == "Nishanth"
+
+
+def test_a_declined_name_still_asks_the_area():
+    app_v3.conversation_memory.update({"stage": "greeting"})
+    _turn("Yes.")
+    spoken, _, stage = _turn("I'd rather not.")
+    assert CALLS == []
+    assert stage == "qualify"
+    low = spoken.lower()
+    assert "okay" not in low
+    assert "part of bengaluru" in low
+    assert app_v3.conversation_memory["customer_name"] is None
+
+
+def test_a_bare_yes_continues_without_a_name():
+    app_v3.conversation_memory.update({"stage": "greeting"})
+    _turn("Yes.")
+    spoken, _, stage = _turn("Yes.")
+    assert CALLS == []
+    assert stage == "qualify"
+    low = spoken.lower()
+    assert "okay" not in low
+    assert "part of bengaluru" in low
+    assert app_v3.conversation_memory["customer_name"] is None
+
+
+def test_a_name_with_a_place_keeps_both():
+    app_v3.conversation_memory.update({"stage": "greeting"})
+    _turn("Yes.")
+    spoken, _, stage = _turn("Anita from Whitefield")
+    assert CALLS == []
+    assert stage == "qualify"
+    low = spoken.lower()
+    assert "okay anita" in low
+    assert "part of bengaluru" not in low
+    assert app_v3.conversation_memory["customer_name"] == "Anita"
+    assert app_v3.conversation_memory["customer_place"] == "Whitefield"
+
+
+def test_a_place_spoken_instead_of_a_name_is_kept():
+    app_v3.conversation_memory.update({"stage": "greeting"})
+    _turn("Yes.")
+    spoken, _, stage = _turn("Whitefield")
+    assert CALLS == []
+    assert stage == "qualify"
+    low = spoken.lower()
+    assert "okay whitefield" not in low
+    assert "part of bengaluru" not in low
+    assert app_v3.conversation_memory["customer_name"] is None
+    assert app_v3.conversation_memory["customer_place"] == "Whitefield"
 
 
 def test_east_three_bedroom_asks_which_location_first():

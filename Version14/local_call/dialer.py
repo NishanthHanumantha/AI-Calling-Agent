@@ -6,6 +6,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from local_call.evaluate import evaluate_saved_call
 from local_call.phone import STREAM_PATH
@@ -49,6 +50,15 @@ def with_sample_rate(url: str) -> str:
     return f"{url}{join}sample-rate=16000"
 
 
+def with_dialed_number(url: str, number: str) -> str:
+    """Carry the customer number onto the media socket. This is not the CallerId."""
+    raw = (number or "").strip()
+    if not raw or "dialed=" in (url or ""):
+        return url
+    join = "&" if "?" in url else "?"
+    return f"{url}{join}dialed={quote(raw, safe='')}"
+
+
 class Dialer:
     """Places at most one call, retries a no-answer once, and skips a closed call."""
 
@@ -89,7 +99,7 @@ class Dialer:
         form = {
             "From": number,
             "CallerId": caller_id,
-            "StreamUrl": with_sample_rate(stream_url),
+            "StreamUrl": with_dialed_number(with_sample_rate(stream_url), number),
             "StreamType": "bidirectional",
             "Record": "false",
         }

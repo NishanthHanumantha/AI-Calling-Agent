@@ -92,6 +92,7 @@ conversation_memory = {
     "awaiting_visit_decision": False,
     "visit_day": None,
     "selected_slot": None,
+    "visit_outcome": None,
     "empty_retry_count": 0,
     "slot_pick_retries": 0,
     "customer_locality": None,
@@ -122,6 +123,9 @@ conversation_memory = {
     "part_skipped": False,
     "customer_part": None,
     "customer_place": None,
+    "customer_name": None,
+    "awaiting_name": False,
+    "opening_text": "",
     "customer_bedrooms": None,
     "config_prompted": False,
     "configuration_skipped": False,
@@ -140,6 +144,8 @@ conversation_memory = {
     "last_location_line": "",
     "customer_language": "en-IN",
     "language_explicit": False,
+    "dialed_number": "",
+    "unstored_topics": [],
     "open_question": None,
     "speech_language": "en-IN",
     "clause_pairs": [],
@@ -1447,6 +1453,41 @@ def unstored_detail_line():
     return "That detail is not confirmed. Our sales advisor can share it."
 
 
+_UNSTORED_LABELS = {
+    "maintenance": "maintenance",
+    "parking": "parking",
+    "rera": "RERA",
+    "possession": "possession",
+    "approval": "approval",
+    "builder": "builder",
+}
+
+
+def _keep_unstored_topic(text):
+    """Remember a card gap once, for the sales sheet. The spoken line stays the same."""
+    found = re.findall(
+        r"\b(maintenance|parking|rera|possession|approval|builder)\b",
+        text or "",
+        re.I,
+    )
+    kept = conversation_memory.setdefault("unstored_topics", [])
+    for word in found:
+        label = _UNSTORED_LABELS[word.lower()]
+        if label not in kept:
+            kept.append(label)
+
+
+def _remember_visit(user_text, outcome):
+    """Store the visit result, and a day or time only when this sentence names one."""
+    conversation_memory["visit_outcome"] = outcome
+    day = chosen_day(user_text)
+    if day:
+        conversation_memory["visit_day"] = day
+    slot = parse_bookable_slot(user_text)
+    if slot:
+        conversation_memory["selected_slot"] = slot
+
+
 def has_not_finalized(text):
     """The customer has not settled the fact just asked."""
     return re.search(
@@ -2487,6 +2528,7 @@ def unmatched_visit_response(user_text):
     """The visit question has its own line for each unmatched reply kind."""
     kind = unmatched_reply_kind(user_text)
     if kind in ("positive", "ambiguous"):
+        _remember_visit(user_text, "Clear yes")
         return advisor_followup_twiml(visit_close_line())
     if kind == "neutral":
         return visit_needs_a_clear_yes_twiml()
@@ -3119,6 +3161,7 @@ def reset_memory():
     conversation_memory["awaiting_visit_decision"] = False
     conversation_memory["visit_day"] = None
     conversation_memory["selected_slot"] = None
+    conversation_memory["visit_outcome"] = None
     conversation_memory["empty_retry_count"] = 0
     conversation_memory["slot_pick_retries"] = 0
     conversation_memory["customer_locality"] = None
@@ -3150,6 +3193,9 @@ def reset_memory():
     conversation_memory["part_skipped"] = False
     conversation_memory["customer_part"] = None
     conversation_memory["customer_place"] = None
+    conversation_memory["customer_name"] = None
+    conversation_memory["awaiting_name"] = False
+    conversation_memory["opening_text"] = ""
     conversation_memory["customer_bedrooms"] = None
     conversation_memory["config_prompted"] = False
     conversation_memory["configuration_skipped"] = False
@@ -3168,6 +3214,8 @@ def reset_memory():
     conversation_memory["last_location_line"] = ""
     conversation_memory["customer_language"] = "en-IN"
     conversation_memory["language_explicit"] = False
+    conversation_memory["dialed_number"] = ""
+    conversation_memory["unstored_topics"] = []
     conversation_memory["speech_language"] = "en-IN"
     conversation_memory["clause_pairs"] = []
     conversation_memory["reply_card"] = None
@@ -3730,6 +3778,107 @@ def _skips_catalog_question(user_text):
     )
 
 
+NAME_QUESTION = "Thanks for taking the call. May I have your name, please?"
+
+_NAME_LEAD = re.compile(
+    r"^(?:my name is|i am|i'm|im|this is|call me|it is|it's|its)\s+",
+    re.I,
+)
+_NAME_FILLER = {
+    "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "fine", "hello", "hi",
+    "hey", "please", "thanks", "thank", "you", "name", "called",
+}
+
+
+def _declines_the_name(text):
+    """The customer did not give a name. The next catalog question still follows."""
+    if is_clear_negative(text) or is_bare_okay(text):
+        return True
+    return re.search(
+        r"\b(rather not|prefer not|don'?t want to (?:say|share|give)|"
+        r"do not want to (?:say|share|give)|no name|not share|won'?t share)\b",
+        text or "",
+        re.I,
+    ) is not None
+
+
+def _has_catalog_detail(text):
+    """A place, project, configuration, purpose, or budget. This is not a person's name."""
+    if catalog.part_of_city(text) or catalog.place_named(text):
+        return True
+    if catalog.project_named_in(text) or catalog.outside_project_named(text):
+        return True
+    if catalog.bedrooms_named(text) is not None or catalog.wants_a_plot(text):
+        return True
+    if catalog.budget_ceiling(text)[0] is not None or is_purpose_statement(text):
+        return True
+    return catalog.undecided(text)
+
+
+def _customer_name_from(text):
+    """One to three name words. A place or a project is left for the catalog."""
+    raw = re.sub(r"[^A-Za-z'\s]", " ", text or "")
+    raw = re.sub(r"\s+", " ", raw).strip()
+    raw = _NAME_LEAD.sub("", raw).strip()
+    raw = re.sub(r"^(?:yes|yeah|yep|sure|okay|ok)\s+", "", raw, flags=re.I).strip()
+    placed = re.match(r"(.+?)\s+(?:from|in|at)\s+(.+)$", raw, re.I)
+    if placed and _has_catalog_detail(placed.group(2)):
+        raw = placed.group(1).strip()
+    if not raw or _declines_the_name(raw) or _has_catalog_detail(raw):
+        return ""
+    if re.search(r"\bnot\b", raw, re.I):
+        return ""
+    words = [word for word in raw.split() if word.lower().strip("'") not in _NAME_FILLER]
+    if not words or len(words) > 3:
+        return ""
+    if any(len(word.strip("'")) < 2 for word in words):
+        return ""
+    return " ".join(word.strip("'").capitalize() for word in words)
+
+
+def _keep_opening_details(user_text):
+    """Remember a place or project from the greeting yes. The name is asked before it is spoken."""
+    conversation_memory["opening_text"] = (user_text or "").strip()
+    conversation_memory["awaiting_name"] = True
+    _absorb_catalog(user_text)
+
+
+def _catalog_line_after_the_name(extra_text):
+    """The catalog line for the greeting yes, plus any detail spoken instead of a name."""
+    opening = (conversation_memory.get("opening_text") or "").strip()
+    extra = (extra_text or "").strip()
+    text = opening
+    if extra and _has_catalog_detail(extra):
+        text = f"{opening} {extra}".strip()
+    reply = catalog_reply(text) if text else None
+    if reply == "ADVISOR":
+        return "ADVISOR"
+    return reply or catalog.AREA_QUESTION
+
+
+def _with_customer_name(line):
+    name = (conversation_memory.get("customer_name") or "").strip()
+    if not name:
+        return line
+    return f"Okay {name}. {line}".strip()
+
+
+def _finish_name_turn(user_text):
+    """Store a name once, then speak the catalog line that the greeting yes already earned."""
+    conversation_memory["awaiting_name"] = False
+    if not _declines_the_name(user_text):
+        name = _customer_name_from(user_text)
+        if name:
+            conversation_memory["customer_name"] = name
+    reply = _catalog_line_after_the_name(user_text)
+    if reply == "ADVISOR":
+        return advisor_followup_twiml()
+    return Response(
+        content=qualification_twiml(_with_customer_name(reply)),
+        media_type="application/xml",
+    )
+
+
 def _absorb_catalog(user_text):
     last = (conversation_memory.get("last_agent_question") or "").lower()
     if _skips_catalog_question(user_text):
@@ -3930,6 +4079,7 @@ def _remember_card(label, body):
 def reply_from_active_cards(user_text):
     """Location, size, price, and amenities come from the projects in focus."""
     if unstored_detail_named(user_text):
+        _keep_unstored_topic(user_text)
         return unstored_detail_line()
     ids = conversation_memory.get("active_project_ids") or []
     if not ids:
@@ -4804,6 +4954,10 @@ def polite_stop(user_text):
         or finished_this_topic(user_text)
         or is_clear_negative(user_text)
     ):
+        if defers_the_visit(user_text):
+            _remember_visit(user_text, "Will check and confirm later")
+        elif is_clear_negative(user_text):
+            _remember_visit(user_text, "Clear no")
         return advisor_followup_twiml()
     return None
 
@@ -4864,11 +5018,13 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
         if question:
             return Response(content=qualification_twiml(question), media_type="application/xml")
     if unstored_detail_named(user_text):
+        _keep_unstored_topic(user_text)
         return Response(
             content=qualification_twiml(unstored_detail_line()),
             media_type="application/xml",
         )
     if conversation_memory.get("visit_offered") and defers_the_visit(user_text):
+        _remember_visit(user_text, "Will check and confirm later")
         return advisor_followup_twiml()
 
     print("=" * 50)
@@ -4895,19 +5051,11 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
         ):
             conversation_memory["stage"] = "qualify"
             conversation_memory["catalog_flow"] = True
-            reply = catalog_reply(user_text)
-            if reply == "ADVISOR":
-                return advisor_followup_twiml()
-            if not reply:
-                reply = catalog.AREA_QUESTION
-            twiml = f"""
-<Response>
-
-{gather_block("Thanks for taking the call. " + reply)}
-
-</Response>
-"""
-            return Response(content=twiml, media_type="application/xml")
+            _keep_opening_details(user_text)
+            return Response(
+                content=qualification_twiml(NAME_QUESTION),
+                media_type="application/xml",
+            )
 
         if is_a_hold(user_text):
             return hold_twiml()
@@ -4940,6 +5088,10 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
             return stopped
         if needs_time(user_text):
             return time_to_decide_twiml()
+        if conversation_memory.get("awaiting_name"):
+            if wants_a_callback(user_text):
+                return ask_or_confirm_callback(user_text)
+            return _finish_name_turn(user_text)
         guided = _catalog_or_model(user_text)
         if guided:
             return guided
@@ -4947,6 +5099,7 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
         if floor:
             return floor
         if wants_site_visit(user_text):
+            _remember_visit(user_text, "Clear yes")
             return advisor_followup_twiml(visit_close_line())
         if asks_about_the_visit(user_text):
             return offer_the_visit_once()
@@ -5012,8 +5165,10 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
             if yes_to_materials(user_text):
                 return share_details_twiml()
             if is_positive(user_text) or wants_site_visit(user_text):
+                _remember_visit(user_text, "Clear yes")
                 return advisor_followup_twiml(visit_close_line())
             if is_clear_negative(user_text):
+                _remember_visit(user_text, "Clear no")
                 return advisor_followup_twiml()
             held = unmatched_visit_response(user_text)
             if held:
@@ -5023,6 +5178,7 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
             return Response(content=twiml, media_type="application/xml")
 
         if wants_site_visit(user_text):
+            _remember_visit(user_text, "Clear yes")
             return advisor_followup_twiml(visit_close_line())
         if asks_about_the_visit(user_text):
             return offer_the_visit_once()
@@ -5112,6 +5268,7 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
         if accepts_the_offered_visit(user_text) or (
             is_positive(user_text) and last_question_is_visit()
         ):
+            _remember_visit(user_text, "Clear yes")
             return advisor_followup_twiml(visit_close_line())
 
         if is_new_faq_question(user_text):

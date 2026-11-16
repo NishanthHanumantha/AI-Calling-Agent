@@ -311,9 +311,12 @@ def trace_snapshot() -> dict:
 
 
 def _save_and_score():
+    from local_call.sales_sheet import record_finished_call
+
     call_log.callback_when = app_v3.conversation_memory.get("callback_when")
     path = call_log.save(RUNS)
     record = call_log.as_dict()
+    record_finished_call(record["call_id"], record["started_at"])
     result = evaluate_saved_call(record, RUNS, project_facts(record))
     return {"saved": True, "call_id": record["call_id"], "scorecard": result["scorecard"], "path": path.name}
 
@@ -465,9 +468,10 @@ def translate_text(text, target):
 
 
 def _fixed_lines():
-    """Qualification lines spoken on every call, area question first."""
+    """Qualification lines spoken on every call. The name is asked before the area."""
     return [
-        "Thanks for taking the call. " + app_v3.catalog.AREA_QUESTION,
+        app_v3.NAME_QUESTION,
+        app_v3.catalog.AREA_QUESTION,
         app_v3.catalog.CONFIGURATION_QUESTION,
         app_v3.catalog.PURPOSE_QUESTION,
         "Got it. You're looking at this as an investment.",
