@@ -1062,6 +1062,10 @@ def unanswered_greeting(text):
         return False
     if app_v3.catalog.project_named_in(text):
         return False
+    if app_v3.conversation_memory.get("awaiting_callback_time"):
+        return False
+    if app_v3.callback_time_named(text):
+        return False
     return True
 
 

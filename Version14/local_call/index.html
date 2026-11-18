@@ -540,7 +540,7 @@
             }
             greetingAudible = true;
             callHeard = true;
-            if (bargeInReady) armBargeIn(session);
+            if (callHeard) armBargeIn(session);
             else armGreetingListen();
             const clipMs = (buffer.duration + 2) * 1000;
             armDeadline(Math.min(20000, Math.max(4000, clipMs)));
@@ -770,29 +770,28 @@
     }
 
     function speechThreshold(current) {
-      return Math.max(0.05, (current.noiseFloor || 0.01) * 3);
+      return Math.max(0.04, (current.noiseFloor || 0.01) * 3);
+    }
+
+    function floorFromRoom(levels) {
+      const quiet = levels.filter((value) => value <= 0.03).sort((a, b) => a - b);
+      if (quiet.length < 3) return 0.01;
+      return quiet[Math.floor((quiet.length - 1) / 2)];
     }
 
     function interruptThreshold(current) {
-      return Math.max(0.14, (current.noiseFloor || 0.01) * 4);
+      return Math.max(0.04, (current.noiseFloor || 0.01) * 4);
+    }
+
+    function bargeThreshold(current) {
+      return Math.max(0.06, (current.noiseFloor || 0.01) * 4);
     }
 
     function noteRoom(current, level) {
       if (current.calibrated) return false;
       current.room.push(level);
       if (current.room.length < 6) return true;
-      const sorted = current.room.slice().sort((a, b) => a - b);
-      const low = sorted[0];
-      const high = sorted[sorted.length - 1];
-      const steady = high - low < 0.015 || high < low * 1.4 + 0.005;
-      const mid = sorted[Math.floor((sorted.length - 1) / 2)];
-      if (steady && mid <= 0.08) {
-        current.noiseFloor = mid;
-      } else if (!steady) {
-        const basis = sorted.filter((value) => value <= Math.max(0.04, low * 2));
-        const used = basis.length ? basis : [low];
-        current.noiseFloor = used[Math.floor((used.length - 1) / 2)];
-      }
+      current.noiseFloor = floorFromRoom(current.room);
       current.calibrated = true;
       current.speechBuffers = 0;
       current.pendingStart = -1;
@@ -931,6 +930,7 @@
         speechNeeded: Math.max(3, Math.round(0.45 / frameSeconds)),
         interruptNeeded: Math.max(3, Math.round(1 / frameSeconds)),
         leadBuffers: Math.max(1, Math.round(0.15 / frameSeconds)),
+        quietNeeded: Math.max(12, Math.round(1.6 / frameSeconds)),
         maxTimer: 0, phase, onInterrupt: null, speechHeld: false,
         ignoreUntil: phase === "customer" ? performance.now() + 400 : 0
       };
@@ -944,37 +944,24 @@
         if (capture.phase === "interrupt") {
           if (!capture.calibrated) {
             capture.room.push(level);
-            if (capture.room.length >= capture.roomNeeded) {
-              const sorted = capture.room.slice().sort((a, b) => a - b);
-              const low = sorted[0];
-              const high = sorted[sorted.length - 1];
-              const steady = high - low < 0.015 || high < low * 1.4 + 0.005;
-              const mid = sorted[Math.floor((sorted.length - 1) / 2)];
-              if (steady) {
-                capture.noiseFloor = mid;
-              } else {
-                const basis = sorted.filter((value) => value <= Math.max(0.04, low * 2));
-                const used = basis.length ? basis : [low];
-                capture.noiseFloor = used[Math.floor((used.length - 1) / 2)];
-              }
-              capture.calibrated = true;
+            if (level > bargeThreshold(capture)) {
+              if (capture.loudBuffers === 0) capture.pendingStart = capture.parts.length - 1;
+              capture.loudBuffers += 1;
+            } else {
               capture.loudBuffers = 0;
             }
-          } else if (level > interruptThreshold(capture)) {
+            if (capture.room.length < 6 && capture.loudBuffers < capture.speechNeeded) return;
+            capture.noiseFloor = floorFromRoom(capture.room);
+            capture.calibrated = true;
+          } else if (level > bargeThreshold(capture)) {
+            if (capture.loudBuffers === 0) capture.pendingStart = capture.parts.length - 1;
             capture.loudBuffers += 1;
           } else {
             capture.loudBuffers = 0;
           }
-          if (
-            capture.calibrated
-            && capture.loudBuffers >= capture.interruptNeeded
-            && capture.onInterrupt
-          ) {
+          if (capture.loudBuffers >= capture.speechNeeded && capture.onInterrupt) {
             const notify = capture.onInterrupt;
             capture.onInterrupt = null;
-            const kept = capture.parts.slice(-capture.interruptNeeded);
-            capture.parts.length = 0;
-            kept.forEach((part) => capture.parts.push(part));
             notify();
           }
           return;
@@ -983,17 +970,7 @@
           if (!capture.calibrated) {
             capture.room.push(level);
             if (capture.room.length < 6) return;
-            const sorted = capture.room.slice().sort((a, b) => a - b);
-            const low = sorted[0];
-            const high = sorted[sorted.length - 1];
-            const steady = high - low < 0.015 || high < low * 1.4 + 0.005;
-            const mid = sorted[Math.floor((sorted.length - 1) / 2)];
-            if (steady && mid <= 0.08) capture.noiseFloor = mid;
-            else if (!steady) {
-              const basis = sorted.filter((value) => value <= Math.max(0.04, low * 2));
-              const used = basis.length ? basis : [low];
-              capture.noiseFloor = used[Math.floor((used.length - 1) / 2)];
-            }
+            capture.noiseFloor = floorFromRoom(capture.room);
             capture.calibrated = true;
             capture.speechBuffers = 0;
             capture.pendingStart = -1;
@@ -1033,7 +1010,7 @@
             return;
           }
           capture.quietBuffers += 1;
-          if (capture.quietBuffers >= 12) capture.speechHeld = true;
+          if (capture.quietBuffers >= capture.quietNeeded) takeCustomerTurn();
           return;
         }
         const opened = noteRoom(capture, level);
@@ -1055,11 +1032,11 @@
           capture.pendingStart = -1;
           if (capture.afterInterrupt) {
             capture.quietBuffers += 1;
-            if (capture.quietBuffers >= 12) takeCustomerTurn();
+            if (capture.quietBuffers >= capture.quietNeeded) takeCustomerTurn();
           }
         } else {
           capture.quietBuffers += 1;
-          if (capture.quietBuffers >= 12) takeCustomerTurn();
+          if (capture.quietBuffers >= capture.quietNeeded) takeCustomerTurn();
         }
       };
       source.connect(processor);
@@ -1083,16 +1060,15 @@
       if (!capture) return;
       capture.phase = "interrupt";
       capture.onInterrupt = () => {
-        session.audio.pause();
         capture.phase = "customer";
-        capture.heardSpeech = false;
-        capture.speechStart = -1;
-        capture.pendingStart = 0;
-        capture.speechBuffers = Math.min(capture.speechNeeded - 1, capture.parts.length);
+        capture.heardSpeech = true;
+        capture.speechStart = Math.max(0, capture.pendingStart);
+        capture.speechBuffers = capture.speechNeeded;
         capture.quietBuffers = 0;
         capture.loudBuffers = 0;
         capture.afterInterrupt = true;
         armSilenceTimer();
+        session.audio.pause();
         session.finish("interrupted");
       };
     }
@@ -1184,7 +1160,8 @@
           missedClause();
           return;
         }
-        if ((outcome === "interrupted" || outcome === "failed") && capture) releaseMic();
+        if (outcome === "failed" && capture) releaseMic();
+        else if (outcome === "interrupted" && capture && capture.phase !== "customer") releaseMic();
         cancelPlayback();
         replyHanded = true;
       }
