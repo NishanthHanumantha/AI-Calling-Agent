@@ -115,6 +115,28 @@ def page():
     return FileResponse(PAGE, headers={"Cache-Control": "no-store"})
 
 
+@local_app.get("/calls")
+def calls_page():
+    return FileResponse(PAGE.with_name("calls.html"), headers={"Cache-Control": "no-store"})
+
+
+@local_app.get("/local/calls")
+def saved_calls():
+    from local_call.dashboard import list_calls
+
+    return {"calls": list_calls(RUNS)}
+
+
+@local_app.get("/local/calls/{call_id}")
+def saved_call(call_id: str):
+    from local_call.dashboard import load_call
+
+    found = load_call(RUNS, call_id)
+    if found is None:
+        return Response(status_code=404)
+    return found
+
+
 @local_app.post("/local/start")
 async def start_call():
     if call_log.turns and not call_log.saved:

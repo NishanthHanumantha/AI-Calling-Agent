@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Call dashboard — Version 14</title>
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", sans-serif;
+      background: #f3f0e8;
+      color: #1c1915;
+      height: 100vh;
+    }
+    a { color: #1f4d3a; }
+    .app {
+      height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.9rem 1.25rem;
+      background: #1f4e79;
+      color: #fff;
+    }
+    header h1 {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 1.35rem;
+      font-weight: 600;
+    }
+    header a { color: #fff; }
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(18rem, 26rem) 1fr;
+      min-height: 0;
+    }
+    .list-pane, .detail-pane { min-height: 0; overflow: auto; }
+    .list-pane {
+      background: #e7e2d6;
+      border-right: 1px solid #d9d1c3;
+      padding: 0.9rem;
+    }
+    .summary {
+      display: flex;
+      gap: 0.6rem;
+      margin-bottom: 0.75rem;
+    }
+    .stat {
+      flex: 1;
+      background: #fff;
+      border-radius: 12px;
+      padding: 0.65rem 0.75rem;
+    }
+    .stat span {
+      display: block;
+      color: #6b645b;
+      font-size: 0.72rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .stat strong { font-size: 1.15rem; }
+    #search {
+      width: 100%;
+      border: 0;
+      border-radius: 999px;
+      padding: 0.7rem 0.95rem;
+      font: 0.95rem "Segoe UI", sans-serif;
+      margin-bottom: 0.75rem;
+    }
+    #cards { display: flex; flex-direction: column; gap: 0.55rem; }
+    .card {
+      display: block;
+      width: 100%;
+      text-align: left;
+      background: #fff;
+      border: 1px solid transparent;
+      border-radius: 14px;
+      padding: 0.75rem 0.85rem;
+      cursor: pointer;
+      font: inherit;
+      color: inherit;
+    }
+    .card:hover { border-color: #c9bfae; }
+    .card.selected {
+      border-color: #1f4e79;
+      box-shadow: inset 3px 0 0 #1f4e79;
+    }
+    .card-top, .card-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.6rem;
+    }
+    .card-name { font-weight: 650; }
+    .card-cost { color: #1f4e79; font-weight: 650; }
+    .card-meta { margin-top: 0.25rem; color: #6b645b; font-size: 0.84rem; }
+    .visit {
+      display: inline-block;
+      margin-top: 0.45rem;
+      background: #eef3f8;
+      color: #1f4e79;
+      border-radius: 999px;
+      padding: 0.15rem 0.55rem;
+      font-size: 0.75rem;
+    }
+    .visit.quiet { background: #f3f0e8; color: #6b645b; }
+    .detail-pane { padding: 1.25rem 1.4rem 2rem; }
+    .detail-empty {
+      height: 100%;
+      display: grid;
+      place-items: center;
+      color: #6b645b;
+    }
+    .detail-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      align-items: flex-start;
+    }
+    .detail-head h2 {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 1.7rem;
+      font-weight: 600;
+    }
+    .when { margin: 0.25rem 0 0; color: #6b645b; }
+    .cost-pill {
+      background: #1f4e79;
+      color: #fff;
+      border-radius: 999px;
+      padding: 0.4rem 0.75rem;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+    .facts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin: 1rem 0;
+    }
+    .facts div {
+      background: #fff;
+      border: 1px solid #e4dccb;
+      border-radius: 12px;
+      padding: 0.45rem 0.7rem;
+    }
+    .facts span {
+      display: block;
+      color: #6b645b;
+      font-size: 0.7rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .recording {
+      display: flex;
+      align-items: center;
+      gap: 0.7rem;
+      background: #fff;
+      border: 1px dashed #c9bfae;
+      border-radius: 14px;
+      padding: 0.75rem 0.9rem;
+      color: #6b645b;
+    }
+    .recording i {
+      width: 2rem;
+      height: 2rem;
+      border-radius: 50%;
+      background: #e7e2d6;
+      flex: none;
+    }
+    .transcript { margin-top: 1rem; display: flex; flex-direction: column; gap: 0.7rem; }
+    .bubble { max-width: 78%; }
+    .bubble.customer { align-self: flex-start; }
+    .bubble.agent { align-self: flex-end; }
+    .bubble p {
+      margin: 0.2rem 0 0;
+      padding: 0.7rem 0.85rem;
+      border-radius: 16px;
+      line-height: 1.4;
+    }
+    .bubble.customer p { background: #fff; border: 1px solid #e4dccb; }
+    .bubble.agent p { background: #1f4e79; color: #fff; }
+    .who { font-size: 0.72rem; letter-spacing: 0.04em; text-transform: uppercase; color: #6b645b; }
+    .origin { display: block; margin-top: 0.25rem; font-size: 0.75rem; color: #1f4e79; text-align: right; }
+    #no-match { color: #6b645b; margin: 0.4rem 0.2rem; }
+    #all-calls {
+      display: none;
+      margin: 0 0 0.75rem;
+      border: 0;
+      background: #fff;
+      color: #1f4e79;
+      border-radius: 999px;
+      padding: 0.45rem 0.8rem;
+      font: 600 0.9rem "Segoe UI", sans-serif;
+      cursor: pointer;
+    }
+    body.focused { height: auto; }
+    body.focused .app { height: auto; min-height: 100vh; }
+    body.focused .summary,
+    body.focused #search,
+    body.focused #no-match,
+    body.focused #empty { display: none; }
+    body.focused #all-calls { display: inline-block; }
+    body.focused .workspace { display: block; }
+    body.focused .list-pane,
+    body.focused .detail-pane { overflow: visible; height: auto; }
+    body.focused .list-pane { border-right: 0; border-bottom: 1px solid #d9d1c3; }
+    body.focused .card:not(.selected) { display: none; }
+    @media (max-width: 800px) {
+      body, .app { height: auto; }
+      .workspace { grid-template-columns: 1fr; }
+      .list-pane { border-right: 0; border-bottom: 1px solid #d9d1c3; }
+      .bubble { max-width: 92%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Call dashboard</h1>
+      <a href="/">Back to the local call</a>
+    </header>
+    <div class="workspace">
+      <section class="list-pane">
+        <button id="all-calls" type="button">All calls</button>
+        <div class="summary">
+          <div class="stat"><span>Calls</span><strong id="call-count">0</strong></div>
+          <div class="stat"><span>Combined cost</span><strong id="call-cost">₹0.00</strong></div>
+        </div>
+        <input id="search" type="search" placeholder="Search name, project, or place" aria-label="Search calls">
+        <p id="empty" hidden>No saved calls yet.</p>
+        <p id="no-match" hidden>No call matches that search.</p>
+        <div id="cards"></div>
+      </section>
+      <section class="detail-pane" id="detail">
+        <div class="detail-empty">Select a call to read what was spoken.</div>
+      </section>
+    </div>
+  </div>
+  <script>
+    const cardsEl = document.getElementById("cards");
+    const detailEl = document.getElementById("detail");
+    const searchEl = document.getElementById("search");
+    const emptyEl = document.getElementById("empty");
+    const noMatchEl = document.getElementById("no-match");
+    const countEl = document.getElementById("call-count");
+    const costEl = document.getElementById("call-cost");
+    const allCallsEl = document.getElementById("all-calls");
+    let calls = [];
+    let selectedId = "";
+
+    function money(value) {
+      if (value === null || value === undefined || value === "") return "Not priced";
+      return "₹" + Number(value).toFixed(2);
+    }
+
+    function shownName(call) {
+      return call.name && call.name !== "Not discussed" ? call.name : "Unnamed caller";
+    }
+
+    function matches(call, query) {
+      const haystack = [call.name, call.project, call.place].join(" ").toLowerCase();
+      return haystack.includes(query);
+    }
+
+    function renderCards() {
+      const query = searchEl.value.trim().toLowerCase();
+      const visible = calls.filter((call) => matches(call, query));
+      cardsEl.replaceChildren();
+      noMatchEl.hidden = !calls.length || visible.length > 0;
+      visible.forEach((call) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "card" + (call.call_id === selectedId ? " selected" : "");
+        const top = document.createElement("div");
+        top.className = "card-top";
+        const name = document.createElement("div");
+        name.className = "card-name";
+        name.textContent = shownName(call);
+        const cost = document.createElement("div");
+        cost.className = "card-cost";
+        cost.textContent = money(call.cost);
+        top.append(name, cost);
+        const meta = document.createElement("div");
+        meta.className = "card-meta";
+        const when = document.createElement("div");
+        when.textContent = [call.date, call.time].filter(Boolean).join(" ");
+        const project = document.createElement("div");
+        project.textContent = call.project && call.project !== "Not discussed" ? call.project : "";
+        meta.append(when, project);
+        button.append(top, meta);
+        if (call.visit) {
+          const visit = document.createElement("div");
+          visit.className = "visit" + (call.visit === "Not discussed" ? " quiet" : "");
+          visit.textContent = call.visit;
+          button.append(visit);
+        }
+        button.addEventListener("click", () => openCall(call.call_id));
+        cardsEl.append(button);
+      });
+    }
+
+    function fact(label, value) {
+      const box = document.createElement("div");
+      const name = document.createElement("span");
+      name.textContent = label;
+      box.append(name, document.createTextNode(value || "—"));
+      return box;
+    }
+
+    function showDetail(call) {
+      detailEl.replaceChildren();
+      const head = document.createElement("div");
+      head.className = "detail-head";
+      const titles = document.createElement("div");
+      const title = document.createElement("h2");
+      title.textContent = shownName(call);
+      const when = document.createElement("p");
+      when.className = "when";
+      const number = call.phone ? " · " + call.phone : "";
+      when.textContent = ([call.date, call.time].filter(Boolean).join(" ") || "Time not stored") + number;
+      titles.append(title, when);
+      const cost = document.createElement("div");
+      cost.className = "cost-pill";
+      cost.textContent = money(call.cost);
+      head.append(titles, cost);
+      const facts = document.createElement("div");
+      facts.className = "facts";
+      [
+        ["Language", call.language],
+        ["Part of Bengaluru", call.part],
+        ["Place", call.place],
+        ["Purpose", call.purpose],
+        ["Configuration", call.configuration],
+        ["Visit", call.visit]
+      ].forEach(([label, value]) => facts.append(fact(label, value)));
+      const recording = document.createElement("div");
+      recording.className = "recording";
+      recording.append(document.createElement("i"));
+      const note = document.createElement("div");
+      note.textContent = call.recording
+        ? "Recording saved"
+        : "The recording will appear here when a telephony company is connected.";
+      recording.append(note);
+      const transcript = document.createElement("div");
+      transcript.className = "transcript";
+      (call.turns || []).forEach((line) => {
+        const block = document.createElement("div");
+        const speaker = (line.speaker || "").toLowerCase();
+        block.className = "bubble " + (speaker === "agent" ? "agent" : "customer");
+        const who = document.createElement("div");
+        who.className = "who";
+        who.textContent = line.speaker || "";
+        const said = document.createElement("p");
+        said.textContent = line.text || "";
+        block.append(who, said);
+        if (line.origin) {
+          const origin = document.createElement("span");
+          origin.className = "origin";
+          origin.textContent = line.origin;
+          block.append(origin);
+        }
+        transcript.append(block);
+      });
+      detailEl.append(head, facts, recording, transcript);
+    }
+
+    function showList() {
+      selectedId = "";
+      document.body.classList.remove("focused");
+      detailEl.replaceChildren();
+      const prompt = document.createElement("div");
+      prompt.className = "detail-empty";
+      prompt.textContent = "Select a call to read what was spoken.";
+      detailEl.append(prompt);
+      renderCards();
+      window.scrollTo(0, 0);
+    }
+
+    async function openCall(id) {
+      selectedId = id;
+      document.body.classList.add("focused");
+      renderCards();
+      window.scrollTo(0, 0);
+      const response = await fetch("/local/calls/" + encodeURIComponent(id));
+      if (!response.ok || selectedId !== id) return;
+      showDetail(await response.json());
+    }
+
+    fetch("/local/calls").then((response) => response.json()).then((data) => {
+      calls = data.calls || [];
+      const priced = calls.map((call) => Number(call.cost)).filter((value) => !Number.isNaN(value));
+      countEl.textContent = String(calls.length);
+      costEl.textContent = money(priced.reduce((sum, value) => sum + value, 0));
+      emptyEl.hidden = calls.length > 0;
+      renderCards();
+    });
+
+    allCallsEl.addEventListener("click", showList);
+
+    searchEl.addEventListener("input", renderCards);
+  </script>
+</body>
+</html>

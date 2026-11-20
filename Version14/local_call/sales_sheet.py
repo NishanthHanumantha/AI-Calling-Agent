@@ -75,6 +75,15 @@ _THIN = Border(
 )
 
 
+def stamp_saved_call(log) -> None:
+    """Keep the sales fields with the call note. Recording stays empty."""
+    log.details = dict(
+        zip(HEADERS, sales_row(app_v3.conversation_memory, call_id=log.call_id, started_at=log.started_at))
+    )
+    if not getattr(log, "recording", None):
+        log.recording = None
+
+
 def record_finished_call(call_id: str, started_at: str, path: Path | None = None) -> None:
     """Append the current call. A sheet error must not drop the saved call."""
     try:
