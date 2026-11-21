@@ -130,14 +130,16 @@
       font-weight: 600;
     }
     .when { margin: 0.25rem 0 0; color: #6b645b; }
-    .cost-pill {
-      background: #1f4e79;
-      color: #fff;
+    .cost-pill, .response-pill {
       border-radius: 999px;
       padding: 0.4rem 0.75rem;
       font-weight: 650;
       white-space: nowrap;
     }
+    .head-pills { display: flex; flex-wrap: wrap; gap: 0.4rem; justify-content: flex-end; }
+    .cost-pill { background: #1f4e79; color: #fff; }
+    .response-pill { background: #1f4d3a; color: #fff; }
+    .waits { display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0.85rem 0 0; }
     .facts {
       display: flex;
       flex-wrap: wrap;
@@ -283,10 +285,16 @@
         const name = document.createElement("div");
         name.className = "card-name";
         name.textContent = shownName(call);
-        const cost = document.createElement("div");
-        cost.className = "card-cost";
-        cost.textContent = money(call.cost);
-        top.append(name, cost);
+        const figures = document.createElement("div");
+        figures.className = "card-cost";
+        figures.textContent = money(call.cost);
+        const responseText = waitLabel((call.latency || {}).response_ms);
+        if (responseText) {
+          const pace = document.createElement("div");
+          pace.textContent = responseText;
+          figures.append(pace);
+        }
+        top.append(name, figures);
         const meta = document.createElement("div");
         meta.className = "card-meta";
         const when = document.createElement("div");
@@ -314,6 +322,14 @@
       return box;
     }
 
+    function waitLabel(value) {
+      if (value === null || value === undefined || value === "") return "";
+      const ms = Number(value);
+      if (Number.isNaN(ms)) return "";
+      if (ms < 1000) return ms + " ms";
+      return (ms / 1000).toFixed(1).replace(/\.0$/, "") + " s";
+    }
+
     function showDetail(call) {
       detailEl.replaceChildren();
       const head = document.createElement("div");
@@ -326,10 +342,28 @@
       const number = call.phone ? " · " + call.phone : "";
       when.textContent = ([call.date, call.time].filter(Boolean).join(" ") || "Time not stored") + number;
       titles.append(title, when);
+      const pills = document.createElement("div");
+      pills.className = "head-pills";
       const cost = document.createElement("div");
       cost.className = "cost-pill";
       cost.textContent = money(call.cost);
-      head.append(titles, cost);
+      pills.append(cost);
+      const responseText = waitLabel((call.latency || {}).response_ms);
+      if (responseText) {
+        const response = document.createElement("div");
+        response.className = "response-pill";
+        response.textContent = "Response " + responseText;
+        pills.append(response);
+      }
+      head.append(titles, pills);
+      const waits = document.createElement("div");
+      waits.className = "waits";
+      const latency = call.latency || {};
+      [
+        ["Hearing", latency.hearing_ms],
+        ["Decision", latency.decision_ms],
+        ["First voice", latency.first_voice_ms]
+      ].forEach(([label, value]) => waits.append(fact(label, waitLabel(value) || "—")));
       const facts = document.createElement("div");
       facts.className = "facts";
       [
@@ -363,12 +397,16 @@
         if (line.origin) {
           const origin = document.createElement("span");
           origin.className = "origin";
-          origin.textContent = line.origin;
+          const times = [
+            line.decision_ms == null ? "" : "Decision " + waitLabel(line.decision_ms),
+            line.first_voice_ms == null ? "" : "First voice " + waitLabel(line.first_voice_ms)
+          ].filter(Boolean).join(" · ");
+          origin.textContent = times ? line.origin + " · " + times : line.origin;
           block.append(origin);
         }
         transcript.append(block);
       });
-      detailEl.append(head, facts, recording, transcript);
+      detailEl.append(head, waits, facts, recording, transcript);
     }
 
     function showList() {

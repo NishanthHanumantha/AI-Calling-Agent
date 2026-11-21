@@ -79,6 +79,7 @@ def summarize(record: dict, sheet_row: dict | None = None) -> dict:
     }
     for heading, key in _DETAIL_FIELDS:
         summary[key] = row.get(heading) or NOT_DISCUSSED
+    summary["latency"] = _latency(record.get("turns") or [])
     if summary["phone"] == NOT_DISCUSSED:
         summary["phone"] = ""
     return summary
@@ -98,9 +99,51 @@ def _turn(turn: dict) -> dict:
                 "speaker": "Agent",
                 "text": reply,
                 "origin": "Written by Sarvam 105B" if written_by_model else "Written sentence",
+                "decision_ms": _milliseconds(turn.get("decision_ms")),
+                "first_voice_ms": _milliseconds(turn.get("tts_ms")),
             }
         )
     return {"lines": lines}
+
+
+def _latency(turns: list) -> dict:
+    """Averages after the customer has spoken. The greeting is not a response."""
+    hearing = []
+    decision = []
+    first_voice = []
+    response = []
+    for turn in turns:
+        if not isinstance(turn, dict) or not (turn.get("customer") or "").strip():
+            continue
+        heard = _milliseconds(turn.get("stt_ms"))
+        chosen = _milliseconds(turn.get("decision_ms"))
+        voice = _milliseconds(turn.get("tts_ms"))
+        if heard is not None:
+            hearing.append(heard)
+        if chosen is not None:
+            decision.append(chosen)
+        if voice is not None:
+            first_voice.append(voice)
+        if chosen is not None and voice is not None:
+            response.append(chosen + voice)
+    return {
+        "hearing_ms": _average(hearing),
+        "decision_ms": _average(decision),
+        "first_voice_ms": _average(first_voice),
+        "response_ms": _average(response),
+    }
+
+
+def _milliseconds(value) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(round(value))
+
+
+def _average(values: list[int]) -> int | None:
+    if not values:
+        return None
+    return int(round(sum(values) / len(values)))
 
 
 def _sales_index(sheet_path: Path | None) -> dict:

@@ -78,6 +78,47 @@ def test_opening_a_call_keeps_the_spoken_order_and_who_wrote_the_reply(tmp_path)
     assert opened["recording"] is None
 
 
-def test_a_call_id_cannot_read_outside_the_runs_folder(tmp_path):
+def test_a_response_average_uses_only_the_answered_turn(tmp_path):
+    _write(
+        tmp_path,
+        "20261118T140000Z",
+        turns=[
+            {
+                "customer": None,
+                "reply": "Hi, this is Sobha Limited calling.",
+                "source": "written greeting",
+                "stt_ms": None,
+                "decision_ms": 5,
+                "tts_ms": 800,
+            },
+            {
+                "customer": "I am Nishant.",
+                "reply": "Okay Nishant.",
+                "source": "written script, qualify",
+                "stt_ms": 400,
+                "decision_ms": 200,
+                "tts_ms": 300,
+            },
+            {
+                "customer": "What is the price?",
+                "reply": "Our advisor can share that.",
+                "source": "language model, chat",
+                "stt_ms": 600,
+                "decision_ms": 100,
+                "tts_ms": None,
+            },
+        ],
+    )
+
+    opened = load_call(tmp_path, "20261118T140000Z", tmp_path / "missing.xlsx")
+
+    assert opened["latency"]["response_ms"] == 500
+    assert opened["latency"]["hearing_ms"] == 500
+    assert opened["latency"]["decision_ms"] == 150
+    assert opened["latency"]["first_voice_ms"] == 300
+    agent = [line for line in opened["turns"] if line["speaker"] == "Agent"]
+    assert agent[1]["decision_ms"] == 200
+    assert agent[1]["first_voice_ms"] == 300
+    assert agent[2]["first_voice_ms"] is None
     assert load_call(tmp_path, "../secret") is None
     assert load_call(tmp_path, "missing") is None
