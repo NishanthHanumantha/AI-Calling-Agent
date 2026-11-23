@@ -422,7 +422,6 @@ def _request_translation(text, target):
             },
             timeout=2,
         )
-        call_log.note_translate(len(posted))
     except requests.Timeout:
         print("LOCAL TRANSLATE STATUS: timeout")
         return None
@@ -716,10 +715,12 @@ async def clause_bytes(text: str):
     started = time.perf_counter()
     language = app_v3.customer_language()
     spoken = english
+    translated = None
     if language in app_v3.SPOKEN_LANGUAGES:
         translated = translate_text(written, language)
         if translated:
             spoken = translated
+            call_log.note_translate(len(written[:2000]))
         else:
             language = "en-IN"
     app_v3.conversation_memory["speech_language"] = language
@@ -872,10 +873,12 @@ async def speak_reply(turn: Turn):
     started = time.perf_counter()
     language = app_v3.customer_language()
     spoken = english
+    translated = None
     if language in app_v3.SPOKEN_LANGUAGES:
         translated = translate_text(written, language)
         if translated:
             spoken = translated
+            call_log.note_translate(len(written[:2000]))
         else:
             language = "en-IN"
     app_v3.conversation_memory["speech_language"] = language

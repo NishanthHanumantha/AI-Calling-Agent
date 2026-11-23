@@ -122,3 +122,37 @@ def test_a_response_average_uses_only_the_answered_turn(tmp_path):
     assert agent[2]["first_voice_ms"] is None
     assert load_call(tmp_path, "../secret") is None
     assert load_call(tmp_path, "missing") is None
+
+
+def test_a_saved_price_keeps_the_three_parts(tmp_path):
+    _write(
+        tmp_path,
+        "20261123T122935Z",
+        usage={
+            "inr_with_gst": 1.2624,
+            "bulbul": {"characters": 867, "inr_with_gst": 1.0231},
+            "speech_to_text": {"seconds": 24.833, "inr_with_gst": 0.2393},
+            "translation": {"characters": 0, "inr_with_gst": 0.0},
+            "language_model": {"inr_with_gst": 0.0},
+        },
+        details={"Project": "SOBHA Valley View", "Location": "Not discussed"},
+    )
+
+    opened = load_call(tmp_path, "20261123T122935Z", tmp_path / "missing.xlsx")
+
+    assert opened["cost"] == 1.26
+    assert opened["price"]["voice"] == {"characters": 867, "inr": 1.02}
+    assert opened["price"]["speech_to_text"]["seconds"] == 24.833
+    assert opened["price"]["speech_to_text"]["inr"] == 0.24
+    assert opened["price"]["translation"] == {"characters": 0, "inr": 0.0}
+    assert "model" not in opened["price"]
+    assert opened["project"] == "SOBHA Valley View"
+
+
+def test_a_total_without_parts_has_no_breakdown(tmp_path):
+    _write(tmp_path, "20261118T150000Z")
+
+    opened = load_call(tmp_path, "20261118T150000Z", tmp_path / "missing.xlsx")
+
+    assert opened["cost"] == 0.44
+    assert opened["price"] is None

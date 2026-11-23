@@ -75,6 +75,7 @@ def summarize(record: dict, sheet_row: dict | None = None) -> dict:
         "date": row.get("Call date") or "",
         "time": row.get("Call time") or "",
         "cost": None if cost is None else round(float(cost), 2),
+        "price": _price(usage),
         "recording": record.get("recording") or None,
     }
     for heading, key in _DETAIL_FIELDS:
@@ -83,6 +84,43 @@ def summarize(record: dict, sheet_row: dict | None = None) -> dict:
     if summary["phone"] == NOT_DISCUSSED:
         summary["phone"] = ""
     return summary
+
+
+def _rupees(part) -> float | None:
+    if not isinstance(part, dict):
+        return None
+    amount = part.get("inr_with_gst")
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        return None
+    return round(float(amount), 2)
+
+
+def _price(usage: dict) -> dict | None:
+    """The GST-inclusive parts already stored with the call. Nothing is priced again."""
+    voice = usage.get("bulbul") if isinstance(usage.get("bulbul"), dict) else None
+    heard = usage.get("speech_to_text") if isinstance(usage.get("speech_to_text"), dict) else None
+    translated = usage.get("translation") if isinstance(usage.get("translation"), dict) else None
+    if voice is None and heard is None and translated is None:
+        return None
+    price = {
+        "voice": {
+            "characters": int(voice.get("characters") or 0) if voice else 0,
+            "inr": _rupees(voice) or 0.0,
+        },
+        "speech_to_text": {
+            "seconds": heard.get("seconds") if heard else None,
+            "inr": _rupees(heard) or 0.0,
+        },
+        "translation": {
+            "characters": int(translated.get("characters") or 0) if translated else 0,
+            "inr": _rupees(translated) or 0.0,
+        },
+    }
+    model = usage.get("language_model") if isinstance(usage.get("language_model"), dict) else None
+    model_inr = _rupees(model)
+    if model_inr:
+        price["model"] = {"inr": model_inr}
+    return price
 
 
 def _turn(turn: dict) -> dict:
