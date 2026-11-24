@@ -194,6 +194,7 @@
       padding: 0.75rem 0.9rem;
       color: #6b645b;
     }
+    .recording audio { flex: 1 1 220px; width: 100%; height: 32px; }
     .recording i {
       width: 2rem;
       height: 2rem;
@@ -461,9 +462,16 @@
       recording.append(document.createElement("i"));
       const note = document.createElement("div");
       note.textContent = call.recording
-        ? "Recording saved"
-        : "The recording will appear here when a telephony company is connected.";
+        ? "Recording of this call."
+        : "No recording was saved for this call.";
       recording.append(note);
+      if (call.recording) {
+        const audio = document.createElement("audio");
+        audio.controls = true;
+        audio.preload = "none";
+        audio.src = "/local/calls/" + encodeURIComponent(call.call_id) + "/recording";
+        recording.append(audio);
+      }
       const transcript = document.createElement("div");
       transcript.className = "transcript";
       (call.turns || []).forEach((line) => {

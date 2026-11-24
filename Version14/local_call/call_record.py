@@ -44,6 +44,7 @@ class CallLog:
         self.saved = False
         self.recording = None
         self.details = None
+        self._clips: list[bytes] = []
 
     def begin(self) -> None:
         self.__init__()
@@ -119,6 +120,32 @@ class CallLog:
     def note_translate(self, characters: int) -> None:
         self._add_characters("translation_characters", characters)
 
+    def note_clip(self, audio: bytes) -> None:
+        """One customer clip or one spoken clause, in the order it was heard."""
+        if not audio:
+            return
+        with self._lock:
+            self._clips.append(bytes(audio))
+
+    def write_recording(self, runs_dir: Path) -> None:
+        """Write one file for this call. A mix that fails leaves the recording empty."""
+        with self._lock:
+            pieces = list(self._clips)
+        if not pieces:
+            return
+        try:
+            from local_call.recording import mix_to_wav
+
+            audio = mix_to_wav(pieces)
+        except Exception:
+            return
+        if not audio:
+            return
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        name = f"{self.call_id}.wav"
+        (runs_dir / name).write_bytes(audio)
+        self.recording = name
+
     def _add_characters(self, key: str, characters: int) -> None:
         with self._lock:
             turn = self._speech_turn
@@ -178,6 +205,7 @@ class CallLog:
         }
 
     def save(self, runs_dir: Path) -> Path:
+        self.write_recording(runs_dir)
         if self.details is None:
             from local_call.sales_sheet import stamp_saved_call
 

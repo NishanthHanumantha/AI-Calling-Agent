@@ -63,7 +63,7 @@ def load_call(runs_dir: Path, call_id: str, sheet_path: Path | None = None) -> d
 
 
 def summarize(record: dict, sheet_row: dict | None = None) -> dict:
-    """The list row. Recording stays empty until a telephony company supplies a file."""
+    """The list row. A browser recording is the filename stored with the call."""
     details = record.get("details") if isinstance(record.get("details"), dict) else {}
     row = dict(sheet_row or {})
     row.update({key: value for key, value in details.items() if value not in (None, "")})

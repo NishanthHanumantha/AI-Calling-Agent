@@ -7,8 +7,11 @@ The page speaks the first clause before the later clauses are synthesized.
 """
 
 import base64
+import hashlib
+import hmac
 import io
 import json
+import os
 import re
 import struct
 import sys
@@ -21,8 +24,8 @@ from pathlib import Path
 import edge_tts
 from dotenv import load_dotenv
 import requests
-from fastapi import FastAPI, File, Form, UploadFile, WebSocket
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi import FastAPI, File, Form, Request, UploadFile, WebSocket
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 VOICE = "en-IN-NeerjaNeural"
@@ -52,6 +55,68 @@ from local_call.usage_note import (  # noqa: E402
 )
 
 local_app = FastAPI()
+STAKEHOLDER_COOKIE = "stakeholder"
+
+
+def stakeholder_passphrase() -> str:
+    """The review passphrase. Empty means this PC stays open."""
+    return (os.getenv("STAKEHOLDER_PASSPHRASE") or "").strip()
+
+
+def _stakeholder_token(phrase: str) -> str:
+    return hmac.new(phrase.encode(), b"version14-review", hashlib.sha256).hexdigest()
+
+
+def stakeholder_allowed(request: Request) -> bool:
+    phrase = stakeholder_passphrase()
+    if not phrase:
+        return True
+    given = request.cookies.get(STAKEHOLDER_COOKIE) or ""
+    return hmac.compare_digest(given, _stakeholder_token(phrase))
+
+
+def _gate_page(next_path: str, rejected: bool = False) -> HTMLResponse:
+    safe = next_path if next_path in {"/", "/calls"} else "/"
+    message = "That passphrase is not the one for this review." if rejected else ""
+    body = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Version 14 review</title>
+  <style>
+    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center;
+      font-family: "Segoe UI", sans-serif; background: #f3f0e8; color: #1c1915; }}
+    form {{ width: min(420px, calc(100% - 2rem)); background: #fff; border: 1px solid #e4dccb;
+      border-radius: 16px; padding: 1.4rem; }}
+    h1 {{ margin: 0 0 0.4rem; font-family: Georgia, serif; font-size: 1.6rem; font-weight: 600; }}
+    p {{ margin: 0 0 1rem; color: #6b645b; }}
+    input {{ width: 100%; padding: 0.7rem 0.8rem; border: 1px solid #e4dccb; border-radius: 10px; font: inherit; }}
+    button {{ margin-top: 0.8rem; background: #1f4e79; color: #fff; border: 0; border-radius: 999px;
+      padding: 0.55rem 1rem; font: inherit; font-weight: 650; cursor: pointer; }}
+  </style>
+</head>
+<body>
+  <form method="post" action="/local/enter">
+    <h1>Version 14</h1>
+    <p>Enter the review passphrase to talk to the agent.</p>
+    <input type="hidden" name="next" value="{safe}">
+    <input type="password" name="passphrase" autocomplete="current-password" required>
+    <button type="submit">Open the call</button>
+    <p>{message}</p>
+  </form>
+</body>
+</html>"""
+    return HTMLResponse(body, status_code=401 if rejected else 200)
+
+
+@local_app.middleware("http")
+async def stakeholder_gate(request: Request, call_next):
+    if request.url.path == "/local/enter" or stakeholder_allowed(request):
+        return await call_next(request)
+    if request.url.path in {"/", "/calls"}:
+        return _gate_page(request.url.path)
+    return Response(status_code=401)
 PAGE = Path(__file__).with_name("index.html")
 call_log = CallLog()
 
@@ -110,6 +175,26 @@ def project_facts(record=None):
     }
 
 
+@local_app.post("/local/enter")
+async def enter_review(request: Request, passphrase: str = Form(""), next: str = Form("/")):
+    """One passphrase opens the call page and the dashboard in this browser."""
+    phrase = stakeholder_passphrase()
+    given = (passphrase or "").strip()
+    if not phrase or not hmac.compare_digest(given, phrase):
+        return _gate_page(next, rejected=True)
+    target = next if next in {"/", "/calls"} else "/"
+    response = RedirectResponse(target, status_code=303)
+    response.set_cookie(
+        STAKEHOLDER_COOKIE,
+        _stakeholder_token(phrase),
+        httponly=True,
+        samesite="lax",
+        max_age=12 * 60 * 60,
+        secure=request.headers.get("x-forwarded-proto") == "https" or request.url.scheme == "https",
+    )
+    return response
+
+
 @local_app.get("/")
 def page():
     return FileResponse(PAGE, headers={"Cache-Control": "no-store"})
@@ -125,6 +210,26 @@ def saved_calls():
     from local_call.dashboard import list_calls
 
     return {"calls": list_calls(RUNS)}
+
+
+@local_app.get("/local/calls/{call_id}/recording")
+def saved_recording(call_id: str):
+    """The browser-call file for one saved call. The id cannot leave the runs folder."""
+    safe = (call_id or "").strip()
+    folder = RUNS.resolve()
+    if not safe or Path(safe).name != safe or safe in {".", ".."}:
+        return Response(status_code=404)
+    path = (folder / f"{safe}.wav").resolve()
+    note = folder / f"{safe}.json"
+    if path.parent != folder or not path.is_file() or not note.is_file():
+        return Response(status_code=404)
+    try:
+        record = json.loads(note.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return Response(status_code=404)
+    if not isinstance(record, dict) or record.get("recording") != f"{safe}.wav":
+        return Response(status_code=404)
+    return FileResponse(path, media_type="audio/wav")
 
 
 @local_app.get("/local/calls/{call_id}")
@@ -892,12 +997,26 @@ async def speak_reply(turn: Turn):
         voice = "neerja"
         if not audio:
             return Response(status_code=502)
+        call_log.note_clip(audio)
         return Response(content=audio, media_type=media, headers=_voice_headers(started, voice))
     return StreamingResponse(
-        _remaining_chunks(stream, first, pending),
+        _remembering_chunks(stream, first, pending),
         media_type="audio/wav",
         headers=_voice_headers(started, "bulbul-ishita", {"X-Audio-Format": "wav"}),
     )
+
+
+def _remembering_chunks(response, first, pending):
+    """Play the clause and keep the same bytes for the call recording."""
+    collected = bytearray()
+    try:
+        for chunk in _remaining_chunks(response, first, pending):
+            if chunk:
+                collected.extend(chunk)
+            yield chunk
+    finally:
+        if collected:
+            call_log.note_clip(bytes(collected))
 
 
 def _voice_headers(started: float, voice: str, extra: dict | None = None) -> dict:
@@ -1138,6 +1257,7 @@ def transcribe_clip(audio: bytes, heard: str = "1") -> dict:
     if transcript:
         app_v3.note_detected_language(body.get("language_code"), transcript)
         call_log.note_stt(transcript, int((time.perf_counter() - started) * 1000))
+        call_log.note_clip(audio)
     return {"text": transcript}
 
 

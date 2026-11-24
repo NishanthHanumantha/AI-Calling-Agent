@@ -170,7 +170,7 @@ def _row_to_project(cells):
         "id": re.sub(r"[^a-z0-9]+", "-", spoken.lower()).strip("-"),
         "spoken": spoken,
         "aliases": _aliases(name, spoken),
-        "brochure": Path(path).name,
+        "brochure": Path(path.replace("\\", "/")).name,
         "theme": theme.strip(),
         "location": location,
         "place": _place(location),
