@@ -3347,3 +3347,131 @@ def test_an_east_place_question_does_not_lock_townpark():
     assert "townpark" not in low
     assert "panathur" in low
     assert "whitefield" in low
+
+
+def _magnus_id():
+    for project in app_v3.catalog.PROJECTS:
+        if "magnus" in project["spoken"].lower():
+            return project["id"]
+    raise AssertionError("SOBHA Magnus is not on the project card")
+
+
+def _ready_magnus():
+    app_v3.conversation_memory.update({
+        "stage": "answer_faq",
+        "catalog_flow": True,
+        "catalog_done": True,
+        "active_project_ids": [_magnus_id()],
+        "customer_configuration": "3 BHK",
+        "customer_purpose": "live",
+        "price_stated": True,
+        "last_agent_question": "What would you like to know about it?",
+        "last_spoken_reply": "What would you like to know about it?",
+    })
+
+
+def test_okay_fine_and_you_can_proceed_stay_on_the_script():
+    for speech in ("Okay, fine.", "Fine.", "Okay, you can proceed."):
+        _ready_magnus()
+        app_v3.conversation_memory["last_spoken_reply"] = (
+            "SOBHA Magnus offers 3 and 4 Bed Residences, 1856 sq. ft. to 2578 sq. ft."
+        )
+        CALLS.clear()
+        spoken, _, _stage = _turn(speech)
+        assert CALLS == [], speech
+        low = spoken.lower()
+        assert "1856" not in spoken
+        assert "kalena" not in low
+        assert "that's alright" in low
+        assert "what else" in low or "anything else" in low
+
+
+def test_you_can_proceed_after_the_greeting_asks_for_the_name():
+    spoken, _, stage = _turn("You can proceed.")
+    assert CALLS == []
+    assert stage == "qualify"
+    assert "name" in spoken.lower()
+
+
+def test_a_building_area_question_speaks_the_card_sentence():
+    _ready_magnus()
+    spoken, _, _stage = _turn("What is the building area?")
+    assert CALLS == []
+    low = spoken.lower()
+    assert "1856" in spoken
+    assert "2578" in spoken
+    assert "kalena" not in low
+    assert "not confirmed" not in low
+    assert "?" not in spoken
+
+
+def test_a_repeated_area_answer_moves_to_the_next_question():
+    _ready_magnus()
+    first, _, _stage = _turn("What is the building area?")
+    assert "1856" in first
+    CALLS.clear()
+    spoken, _, _stage = _turn("What is the exact area?")
+    assert CALLS == []
+    assert "1856" not in spoken
+    assert "2578" not in spoken
+    low = spoken.lower()
+    assert "what else" in low or "anything else" in low
+
+
+def test_an_unwritten_place_time_and_date_are_not_spoken(monkeypatch):
+    _ready_magnus()
+    monkeypatch.setattr(app_v3, "_load_focus_brochures", lambda projects: None)
+    monkeypatch.setattr(
+        app_v3,
+        "retrieve_context",
+        lambda intent, query: ("SOBHA Magnus is on Bannerghatta Main Road.", 0.4),
+    )
+    spoken, _, _stage = _turn("How far is Kalena Agrahara metro?")
+    assert CALLS == []
+    low = spoken.lower()
+    assert "not confirmed" in low
+    assert "kalena" not in low
+    assert "minute" not in low
+    assert "2026" not in low
+    assert "december" not in low
+
+
+def test_a_written_brochure_sentence_is_spoken_for_that_place(monkeypatch):
+    _ready_magnus()
+    sentence = "Kalena Agrahara Metro is a short walk from the project."
+    monkeypatch.setattr(app_v3, "_load_focus_brochures", lambda projects: None)
+    monkeypatch.setattr(
+        app_v3,
+        "retrieve_context",
+        lambda intent, query: (sentence, 0.4),
+    )
+    spoken, _, _stage = _turn("How far is Kalena Agrahara metro?")
+    assert CALLS == []
+    assert sentence in spoken
+    assert "landmark" not in spoken.lower()
+    assert spoken.count("?") == 0
+
+
+def test_the_model_cannot_add_an_unasked_place(monkeypatch):
+    _ready_magnus()
+    monkeypatch.setattr(app_v3, "_load_focus_brochures", lambda projects: None)
+    monkeypatch.setattr(
+        app_v3,
+        "retrieve_context",
+        lambda intent, query: ("SOBHA Magnus is an eco-luxe project.", 0.2),
+    )
+    question = "Is the construction quality good?"
+    REPLIES[question] = (
+        "The homes are well built. It is a 10 minute walk to Kalena Agrahara Metro, "
+        "and Pink Line Phase 2 opens by December 2026. "
+        "Would you like to know about landmarks near Kalena Agrahara?"
+    )
+    spoken, _, _stage = _turn(question)
+    REPLIES.pop(question, None)
+    low = spoken.lower()
+    assert "kalena" not in low
+    assert "december" not in low
+    assert "2026" not in low
+    assert "landmark" not in low
+    assert "minute" not in low
+    assert "not confirmed" in low

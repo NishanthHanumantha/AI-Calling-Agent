@@ -50,7 +50,7 @@
     .summary {
       display: flex;
       gap: 0.6rem;
-      margin-bottom: 0.75rem;
+      margin-bottom: 0.35rem;
     }
     .stat {
       flex: 1;
@@ -163,7 +163,7 @@
     .price-row strong { display: block; font-weight: 650; }
     .price-row small { display: block; color: #6b645b; margin-top: 0.1rem; }
     .price-row b { font-weight: 650; white-space: nowrap; }
-    .price-note { margin: 0.15rem 0 0; color: #6b645b; font-size: 0.8rem; }
+    .price-note, .sarvam-note { margin: 0.15rem 0 0.75rem; color: #6b645b; font-size: 0.8rem; }
     .waits { display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0.85rem 0 0; }
     .facts {
       display: flex;
@@ -231,6 +231,7 @@
     body.focused { height: auto; }
     body.focused .app { height: auto; min-height: 100vh; }
     body.focused .summary,
+    body.focused .sarvam-note,
     body.focused #search,
     body.focused #no-match,
     body.focused #empty { display: none; }
@@ -259,8 +260,9 @@
         <button id="all-calls" type="button">All calls</button>
         <div class="summary">
           <div class="stat"><span>Calls</span><strong id="call-count">0</strong></div>
-          <div class="stat"><span>Combined cost</span><strong id="call-cost">₹0.00</strong></div>
+          <div class="stat"><span>Sarvam cost</span><strong id="call-cost">₹0.00</strong></div>
         </div>
+        <p class="sarvam-note">This price is for Sarvam only. Telephony cost will be added when the telephony company is connected.</p>
         <input id="search" type="search" placeholder="Search name, project, or place" aria-label="Search calls">
         <p id="empty" hidden>No saved calls yet.</p>
         <p id="no-match" hidden>No call matches that search.</p>
@@ -362,7 +364,7 @@
       panel.className = "price-panel";
       panel.hidden = true;
       const rows = [
-        ["Voice", price.voice, (part) => (part.characters || 0) + " characters × ₹1 / 1,000"],
+        ["Voice", price.voice, (part) => (part.characters || 0) + " characters × ₹2 / 1,000"],
         ["Speech to text", price.speech_to_text, (part) => Number(part.seconds || 0).toFixed(1) + " s × ₹0.49 / minute"],
         ["Translation", price.translation, (part) => (part.characters || 0) + " characters × ₹2 / 1,000"]
       ];
@@ -394,7 +396,7 @@
       }
       const note = document.createElement("p");
       note.className = "price-note";
-      note.textContent = "Each amount includes GST.";
+      note.textContent = "This price is for Sarvam only. Telephony cost will be added when the telephony company is connected.";
       panel.append(note);
       return panel;
     }

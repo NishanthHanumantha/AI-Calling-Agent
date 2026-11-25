@@ -3,89 +3,134 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Sobha Bengaluru local call — Version 14</title>
+    <title>Sobha AI Calling Agent</title>
   <style>
     :root { color-scheme: light; }
     body {
       margin: 0;
-      font-family: Georgia, "Times New Roman", serif;
-      background: #f4f1ea;
+      font-family: "Segoe UI", sans-serif;
       color: #1c1915;
+      background:
+        radial-gradient(900px 420px at 50% -12%, #e4eee6 0%, rgba(243, 239, 230, 0) 70%),
+        #f3efe6;
     }
     main {
-      max-width: 46rem;
+      max-width: 42rem;
       margin: 0 auto;
-      padding: 2rem 1.25rem 3rem;
+      padding: 4.2rem 1.25rem 3.5rem;
     }
-    h1 { font-size: 1.6rem; font-weight: 600; margin: 0 0 0.4rem; }
-    p { line-height: 1.45; }
-    .note {
+    .rule {
+      width: 2.4rem;
+      height: 2px;
+      margin: 0 0 1.15rem;
+      background: #b8956a;
+    }
+    h1 {
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 2.35rem;
+      font-weight: 500;
+      letter-spacing: -0.03em;
+      line-height: 1.12;
+      margin: 0 0 0.85rem;
+    }
+    p { line-height: 1.55; margin: 0; }
+    .lead { font-size: 1.12rem; margin-bottom: 0.7rem; }
+    .about { color: #5c564e; margin: 0 0 0.95rem; }
+    .quiet { margin: 0 0 1.6rem; font-size: 0.92rem; }
+    a { color: #1b4332; }
+    .stage {
       background: #fff;
-      border: 1px solid #ddd6c8;
-      border-radius: 8px;
-      padding: 0.8rem 1rem;
-      font-family: "Segoe UI", sans-serif;
-      font-size: 0.92rem;
+      border: 1px solid #e8e1d4;
+      border-radius: 24px;
+      padding: 1.15rem 1.15rem 1.3rem;
+      box-shadow: 0 18px 50px rgba(28, 25, 21, 0.06);
     }
-    .controls { display: flex; gap: 0.6rem; margin: 1rem 0; }
+    .controls { display: flex; flex-wrap: wrap; gap: 0.55rem; margin: 0 0 0.95rem; }
     button {
       font: 600 1rem "Segoe UI", sans-serif;
-      border: 0;
+      border: 1px solid transparent;
       border-radius: 999px;
-      padding: 0.7rem 1.2rem;
+      padding: 0.75rem 1.3rem;
       cursor: pointer;
     }
-    #start { background: #1f4d3a; color: #fff; }
-    #hangup { background: #8c3a32; color: #fff; }
-    button:disabled { opacity: 0.45; cursor: default; }
-    #status { font-family: "Segoe UI", sans-serif; min-height: 1.4rem; }
-    a { color: #1f4d3a; }
+    #start {
+      background: #1b4332;
+      color: #fff;
+      box-shadow: 0 8px 18px rgba(27, 67, 50, 0.22);
+    }
+    #start:hover { background: #16382a; }
+    #done, #hangup { background: #fbfaf7; color: #3d3832; border-color: #e4dccb; }
+    #hangup { color: #8c3a32; }
+    button:disabled { opacity: 0.45; cursor: default; box-shadow: none; }
+    #status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      min-height: 1.2rem;
+      background: #f7f4ee;
+      border-radius: 999px;
+      padding: 0.4rem 0.85rem;
+      font-size: 0.9rem;
+      color: #3d3832;
+    }
+    #status::before {
+      content: "";
+      width: 0.45rem;
+      height: 0.45rem;
+      border-radius: 50%;
+      background: #1b4332;
+    }
     #log {
       list-style: none;
       padding: 0;
-      margin: 1rem 0 0;
+      margin: 1.15rem 0 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.65rem;
     }
     #log li {
+      max-width: 82%;
       background: #fff;
-      border-radius: 8px;
-      padding: 0.7rem 0.9rem;
-      margin-bottom: 0.5rem;
+      border: 1px solid #eee8dc;
+      padding: 0.75rem 0.95rem;
+      box-shadow: 0 8px 18px rgba(28, 25, 21, 0.04);
+    }
+    #log li.agent { align-self: flex-start; border-radius: 6px 18px 18px 18px; }
+    #log li.customer {
+      align-self: flex-end;
+      background: #f6f1e6;
+      border-color: #eadfcd;
+      border-radius: 18px 6px 18px 18px;
     }
     #log .who {
       display: block;
-      font-family: "Segoe UI", sans-serif;
-      font-size: 0.75rem;
-      letter-spacing: 0.04em;
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
       text-transform: uppercase;
-      color: #6b645b;
-      margin-bottom: 0.2rem;
+      color: #8a8174;
+      margin-bottom: 0.25rem;
     }
-    #trace, #log li.trace {
-      font-family: "Segoe UI", sans-serif;
-      font-size: 0.88rem;
-      line-height: 1.45;
+    #trace, #log li.trace { font-size: 0.82rem; line-height: 1.45; color: #5c564e; }
+    #trace { margin-top: 1.1rem; padding-top: 0.85rem; border-top: 1px solid #eee8dc; }
+    #trace p { margin: 0.25rem 0; }
+    #log li.trace {
+      align-self: stretch;
+      max-width: none;
+      background: transparent;
+      border: 0;
+      box-shadow: none;
+      padding: 0.15rem 0 0;
     }
-    #trace {
-      background: #fff;
-      border: 1px solid #ddd6c8;
-      border-radius: 8px;
-      padding: 0.8rem 1rem;
-      margin-top: 1rem;
-    }
-    #trace p { margin: 0.2rem 0; }
-    #log li.trace { background: #f7f4ee; }
   </style>
 </head>
 <body>
   <main>
-    <h1>Local call — Version 14</h1>
-    <p class="note">
-      This call is about Sobha's residential projects in Bengaluru.
-      The microphone in this Cursor window is already allowed. Your speech is transcribed by Sarvam, and Ishita starts speaking at the first sentence.
-      You can speak while she is talking. She stops, drops the rest of that reply, and answers what you said.
-      Twilio and Polly Kajal-Neural are not used on this page.
-      <a href="/calls">Call dashboard</a>
-    </p>
+    <div class="rule"></div>
+    <h1>Sobha AI Calling Agent</h1>
+    <p class="lead">This call is about Sobha's residential projects in Bengaluru.</p>
+    <p class="about">The calling agent initiates an outbound call, asks which part of Bengaluru the customer is considering and a few other qualification questions, proposes the projects that align with the customer's interest and answers about the project details that the customer asks, and also offers a site visit.</p>
+    <p class="quiet"><a href="/calls">Call dashboard</a></p>
+    <section class="stage">
     <div class="controls">
       <button id="start" type="button">Start call</button>
       <button id="done" type="button" disabled>Done speaking</button>
@@ -97,6 +142,7 @@
       <p id="cost"></p>
     </section>
     <ul id="log"></ul>
+    </section>
   </main>
   <script>
     const startBtn = document.getElementById("start");
@@ -134,8 +180,17 @@
 
     function setStatus(text) { statusEl.textContent = text; }
 
+    function dbg(hypothesisId, message, data) {
+      // #region agent log
+      const payload = {sessionId:"b89e8b",hypothesisId,location:"index.html",message,data,timestamp:Date.now(),runId:"post-fix"};
+      fetch("http://127.0.0.1:7784/ingest/9491e75a-e7f7-4689-8df8-894a4d45047b",{method:"POST",headers:{"Content-Type":"application/json","X-Debug-Session-Id":"b89e8b"},body:JSON.stringify(payload)}).catch(()=>{});
+      fetch("/local/debug",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)}).catch(()=>{});
+      // #endregion
+    }
+
     function addLine(who, text) {
       const item = document.createElement("li");
+      item.className = who === "You" ? "customer" : "agent";
       const label = document.createElement("span");
       label.className = "who";
       label.textContent = who;
@@ -154,44 +209,61 @@
       return "₹" + value;
     }
 
+    function known(value) {
+      return value !== null && value !== undefined && value !== "";
+    }
+
     function showRunning(trace) {
       const averages = trace.averages || {};
       const usage = trace.usage || {};
-      const model = usage.language_model || {};
-      const speech = usage.speech_to_text || {};
-      const voice = usage.bulbul || {};
-      const translation = usage.translation || {};
-      traceEl.hidden = false;
-      paceEl.textContent = "Script decision " + blank(averages.script_ms, "ms")
-        + " · Model decision " + blank(averages.model_ms, "ms");
-      costEl.textContent = "Rates checked " + (usage.rates_checked || "—")
-        + ". Language model " + rupee(model.inr_ex_gst)
-        + " · Speech to text " + rupee(speech.inr_ex_gst)
-        + " · Bulbul " + rupee(voice.inr_ex_gst)
-        + " · Translation " + rupee(translation.inr_ex_gst)
-        + " (ex GST " + rupee(usage.inr_ex_gst)
-        + ", with GST " + rupee(usage.inr_with_gst) + ")";
+      const pace = [];
+      if (known(averages.script_ms)) pace.push("Script decision " + averages.script_ms + " ms");
+      if (known(averages.model_ms)) pace.push("Model decision " + averages.model_ms + " ms");
+      const parts = [
+        runningPart("Language model", usage.language_model),
+        runningPart("Speech to text", usage.speech_to_text),
+        runningPart("Bulbul", usage.bulbul),
+        runningPart("Translation", usage.translation)
+      ].filter(Boolean);
+      paceEl.textContent = pace.join(" · ");
+      costEl.textContent = parts.length
+        ? "Sarvam " + rupee(usage.inr_ex_gst) + ". " + parts.join(" · ")
+          + ". This price is for Sarvam only. Telephony cost will be added when the telephony company is connected."
+        : "";
+      traceEl.hidden = !paceEl.textContent && !costEl.textContent;
+    }
+
+    function runningPart(label, amount) {
+      if (!amount || !(Number(amount.inr_ex_gst) > 0)) return "";
+      return label + " " + rupee(amount.inr_ex_gst);
     }
 
     function costText(label, amount, unit, suffix) {
       const quantity = amount && amount[unit];
-      const shown = quantity == null ? "—" : quantity + " " + suffix;
-      return label + " " + shown
-        + ", " + rupee(amount && amount.inr_ex_gst) + " ex GST"
-        + ", " + rupee(amount && amount.inr_with_gst) + " with GST";
+      return label + " " + quantity + " " + suffix
+        + ", " + rupee(amount && amount.inr_ex_gst);
     }
 
     function turnRow(index) {
       return logEl.querySelector('li.trace[data-turn="' + index + '"]');
     }
 
+    function showCost(node, label, amount, unit, suffix) {
+      if (!node) return;
+      const quantity = amount && amount[unit];
+      if (typeof quantity !== "number" || quantity <= 0) {
+        node.hidden = true;
+        node.textContent = "";
+        return;
+      }
+      node.hidden = false;
+      node.textContent = costText(label, amount, unit, suffix);
+    }
+
     function fillCost(row, turn) {
-      const speech = row.querySelector("[data-cost='speech']");
-      const voice = row.querySelector("[data-cost='bulbul']");
-      const translated = row.querySelector("[data-cost='translation']");
-      if (speech) speech.textContent = costText("Speech to text", turn.speech_to_text, "seconds", "s");
-      if (voice) voice.textContent = costText("Bulbul", turn.bulbul, "characters", "characters");
-      if (translated) translated.textContent = costText("Translation", turn.translation, "characters", "characters");
+      showCost(row.querySelector("[data-cost='speech']"), "Speech to text", turn.speech_to_text, "seconds", "s");
+      showCost(row.querySelector("[data-cost='bulbul']"), "Bulbul", turn.bulbul, "characters", "characters");
+      showCost(row.querySelector("[data-cost='translation']"), "Translation", turn.translation, "characters", "characters");
       const count = (turn.neerja || {}).characters || 0;
       let neerja = row.querySelector("[data-cost='neerja']");
       if (!count) {
@@ -225,21 +297,20 @@
       const item = document.createElement("li");
       item.className = "trace";
       item.dataset.turn = String(turn.turn_index);
-      const title = document.createElement("span");
-      title.className = "who";
-      title.textContent = "This turn";
-      item.append(title);
-      const lines = [
-        turn.customer ? "Customer: " + turn.customer : "",
-        "Answered by " + (turn.source || "—"),
-        "Stage " + (turn.stage || "—"),
-        "Heard in " + blank(turn.stt_ms, "ms"),
-        "Decision " + blank(turn.decision_ms, "ms"),
-        "Model " + blank(turn.llm_ms, "ms"),
-        "First voice " + blank(turn.tts_ms, "ms"),
-        "Tokens prompt " + blank(turn.prompt_tokens)
+      const tokenLine = [turn.prompt_tokens, turn.completion_tokens, turn.cached_tokens].some(known)
+        ? "Tokens prompt " + blank(turn.prompt_tokens)
           + ", completion " + blank(turn.completion_tokens)
           + ", cached " + blank(turn.cached_tokens)
+        : "";
+      const lines = [
+        turn.customer ? "Customer: " + turn.customer : "",
+        turn.source ? "Answered by " + turn.source : "",
+        turn.stage ? "Stage " + turn.stage : "",
+        known(turn.stt_ms) ? "Heard in " + turn.stt_ms + " ms" : "",
+        known(turn.decision_ms) ? "Decision " + turn.decision_ms + " ms" : "",
+        known(turn.llm_ms) ? "Model " + turn.llm_ms + " ms" : "",
+        known(turn.tts_ms) ? "First voice " + turn.tts_ms + " ms" : "",
+        tokenLine
       ].filter(Boolean);
       lines.forEach((line) => {
         const row = document.createElement("div");
@@ -247,6 +318,12 @@
         if (line.indexOf("First voice") === 0) row.dataset.voice = "1";
         item.append(row);
       });
+      if (!known(turn.tts_ms)) {
+        const pending = document.createElement("div");
+        pending.dataset.voice = "1";
+        pending.hidden = true;
+        item.append(pending);
+      }
       ["speech", "bulbul", "translation"].forEach((name) => {
         const row = document.createElement("div");
         row.dataset.cost = name;
@@ -262,6 +339,7 @@
       const slot = rows[rows.length - 1];
       if (!slot || slot.dataset.filled) return;
       slot.dataset.filled = "1";
+      slot.hidden = false;
       slot.textContent = "First voice " + value + " ms";
     }
 
@@ -772,7 +850,7 @@
     }
 
     function speechThreshold(current) {
-      return Math.max(0.04, (current.noiseFloor || 0.01) * 3);
+      return Math.max(0.015, (current.noiseFloor || 0.01) * 3);
     }
 
     function floorFromRoom(levels) {
@@ -800,18 +878,23 @@
       current.heardSpeech = false;
       current.speechStart = -1;
       const threshold = speechThreshold(current);
+      const needed = current.customerNeeded || current.speechNeeded;
       const offset = current.parts.length - current.room.length;
       current.room.forEach((value, index) => {
         if (value > threshold) {
+          current.gapBuffers = 0;
           if (current.speechBuffers === 0) current.pendingStart = offset + index;
           current.speechBuffers += 1;
-          if (current.speechBuffers >= current.speechNeeded && current.speechStart < 0) {
+          if (current.speechBuffers >= needed && current.speechStart < 0) {
             current.heardSpeech = true;
             current.speechStart = current.pendingStart;
           }
+        } else if (current.speechBuffers > 0 && current.gapBuffers < 2) {
+          current.gapBuffers += 1;
         } else {
           current.speechBuffers = 0;
           current.pendingStart = -1;
+          current.gapBuffers = 0;
         }
       });
       return true;
@@ -821,14 +904,27 @@
       if (!capture) return null;
       const current = capture;
       releaseMic();
-      if (!current.heardSpeech || current.speechStart < 0) return null;
+      if (!current.heardSpeech || current.speechStart < 0) {
+        dbg("A", "capture empty", {
+          phase: current.phase,
+          heard: current.heardSpeech,
+          parts: current.parts.length,
+          maxLevel: Math.round((current.maxLevel || 0) * 1000) / 1000,
+          maxRun: current.maxRun || 0,
+          speechNeeded: current.speechNeeded,
+          threshold: Math.round(speechThreshold(current) * 1000) / 1000,
+          noiseFloor: Math.round((current.noiseFloor || 0) * 1000) / 1000,
+          sampleRate: current.context.sampleRate
+        });
+        return null;
+      }
       const start = Math.max(0, current.speechStart - current.leadBuffers);
       const merged = downsample(
         mergeSamples(current.parts.slice(start)),
         current.context.sampleRate,
         16000
       );
-      if (merged.length < 16000 * 0.45) return null;
+      if (merged.length < 16000 * 0.25) return null;
       return encodeWav(merged, 16000);
     }
 
@@ -927,9 +1023,12 @@
         context, source, processor, mute, stream,
         parts: [], room: [], noiseFloor: 0.01, calibrated: false,
         heardSpeech: false, speechBuffers: 0, speechStart: -1, pendingStart: -1,
+        maxLevel: 0, maxRun: 0,
         quietBuffers: 0, loudBuffers: 0, afterInterrupt: false,
         roomNeeded: Math.max(8, Math.round(1 / frameSeconds)),
         speechNeeded: Math.max(3, Math.round(0.45 / frameSeconds)),
+        customerNeeded: Math.max(3, Math.round(0.25 / frameSeconds)),
+        gapBuffers: 0,
         interruptNeeded: Math.max(3, Math.round(1 / frameSeconds)),
         leadBuffers: Math.max(1, Math.round(0.15 / frameSeconds)),
         quietNeeded: Math.max(12, Math.round(1.6 / frameSeconds)),
@@ -944,6 +1043,15 @@
         capture.parts.push(channel);
         const level = levelOf(channel, capture.context.sampleRate);
         if (capture.phase === "interrupt") {
+          if (!capture._levelAt || performance.now() - capture._levelAt > 2000) {
+            capture._levelAt = performance.now();
+            dbg("A", "barge level", {
+              level: Math.round(level * 1000) / 1000,
+              threshold: Math.round(bargeThreshold(capture) * 1000) / 1000,
+              loud: capture.loudBuffers,
+              calibrated: capture.calibrated
+            });
+          }
           if (!capture.calibrated) {
             capture.room.push(level);
             if (level > bargeThreshold(capture)) {
@@ -962,6 +1070,7 @@
             capture.loudBuffers = 0;
           }
           if (capture.loudBuffers >= capture.speechNeeded && capture.onInterrupt) {
+            dbg("A", "barge fired", {loud: capture.loudBuffers});
             const notify = capture.onInterrupt;
             capture.onInterrupt = null;
             notify();
@@ -1015,31 +1124,52 @@
           if (capture.quietBuffers >= capture.quietNeeded) takeCustomerTurn();
           return;
         }
+        capture.maxLevel = Math.max(capture.maxLevel || 0, level);
+        capture.maxRun = Math.max(capture.maxRun || 0, capture.speechBuffers);
+        if (!capture._levelAt || performance.now() - capture._levelAt > 2000) {
+          capture._levelAt = performance.now();
+          dbg("B", "customer level", {
+            level: Math.round(level * 1000) / 1000,
+            threshold: Math.round(speechThreshold(capture) * 1000) / 1000,
+            run: capture.speechBuffers,
+            needed: capture.customerNeeded,
+            heard: capture.heardSpeech,
+            calibrated: capture.calibrated
+          });
+        }
         const opened = noteRoom(capture, level);
         if (opened) {
+          capture.maxRun = Math.max(capture.maxRun || 0, capture.speechBuffers);
           if (capture.heardSpeech) setStatus("Hearing you.");
           return;
         }
         if (level > speechThreshold(capture)) {
+          capture.gapBuffers = 0;
           if (capture.speechBuffers === 0) capture.pendingStart = capture.parts.length - 1;
           capture.speechBuffers += 1;
           capture.quietBuffers = 0;
-          if (!capture.heardSpeech && capture.speechBuffers >= capture.speechNeeded) {
+          if (!capture.heardSpeech && capture.speechBuffers >= capture.customerNeeded) {
             capture.heardSpeech = true;
             capture.speechStart = capture.pendingStart;
             setStatus("Hearing you.");
           }
         } else if (!capture.heardSpeech) {
-          capture.speechBuffers = 0;
-          capture.pendingStart = -1;
-          if (capture.afterInterrupt) {
-            capture.quietBuffers += 1;
-            if (capture.quietBuffers >= capture.quietNeeded) takeCustomerTurn();
+          if (capture.speechBuffers > 0 && capture.gapBuffers < 2) {
+            capture.gapBuffers += 1;
+          } else {
+            capture.speechBuffers = 0;
+            capture.pendingStart = -1;
+            capture.gapBuffers = 0;
+            if (capture.afterInterrupt) {
+              capture.quietBuffers += 1;
+              if (capture.quietBuffers >= capture.quietNeeded) takeCustomerTurn();
+            }
           }
         } else {
           capture.quietBuffers += 1;
           if (capture.quietBuffers >= capture.quietNeeded) takeCustomerTurn();
         }
+        capture.maxRun = Math.max(capture.maxRun || 0, capture.speechBuffers);
       };
       source.connect(processor);
       processor.connect(mute);
@@ -1090,6 +1220,7 @@
       busy = true;
       doneBtn.disabled = true;
       setStatus("Transcribing.");
+      dbg("B", "transcribing", {bytes: blob.size, greetingAudible});
       const body = new FormData();
       body.append("file", blob, "speech.wav");
       body.append("heard", greetingAudible ? "1" : "0");

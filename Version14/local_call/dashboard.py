@@ -6,6 +6,48 @@ import json
 from pathlib import Path
 
 from local_call.sales_sheet import HEADERS, NOT_DISCUSSED, SHEET_PATH
+from local_call.usage_note import (
+    BULBUL_INR_PER_CHARACTER,
+    CACHED_INR_PER_TOKEN,
+    INPUT_INR_PER_TOKEN,
+    OUTPUT_INR_PER_TOKEN,
+    STT_INR_PER_SECOND,
+    TRANSLATE_INR_PER_CHARACTER,
+    priced,
+)
+
+_PROGRESSED = (
+    "Part of Bengaluru",
+    "Location",
+    "Project",
+    "Purpose",
+    "Configuration",
+    "Size",
+    "Price range",
+    "Site visit",
+    "Visit day",
+    "Visit time",
+    "Callback",
+)
+
+
+def _filled(value) -> bool:
+    text = "" if value is None else str(value).strip()
+    return bool(text) and text != NOT_DISCUSSED
+
+
+def _merged_details(record: dict, sheet_row: dict | None) -> dict:
+    details = record.get("details") if isinstance(record.get("details"), dict) else {}
+    row = dict(sheet_row or {})
+    row.update({key: value for key, value in details.items() if value not in (None, "")})
+    return row
+
+
+def _reached_a_question(record: dict, sheet_row: dict | None) -> bool:
+    """A name-only call, such as one saved as Written, stays off the stakeholder list."""
+    row = _merged_details(record, sheet_row)
+    return any(_filled(row.get(field)) for field in _PROGRESSED)
+
 
 _DETAIL_FIELDS = (
     ("Customer name", "name"),
@@ -32,8 +74,11 @@ def list_calls(runs_dir: Path, sheet_path: Path | None = None) -> list[dict]:
             record = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(record, dict) and record.get("call_id"):
-            calls.append(summarize(record, sheet.get(record["call_id"]) or {}))
+        if not isinstance(record, dict) or not record.get("call_id"):
+            continue
+        sheet_row = sheet.get(record["call_id"]) or {}
+        if _reached_a_question(record, sheet_row):
+            calls.append(summarize(record, sheet_row))
     return calls
 
 
@@ -68,14 +113,14 @@ def summarize(record: dict, sheet_row: dict | None = None) -> dict:
     row = dict(sheet_row or {})
     row.update({key: value for key, value in details.items() if value not in (None, "")})
     usage = record.get("usage") if isinstance(record.get("usage"), dict) else {}
-    cost = usage.get("inr_with_gst")
+    price, cost = _sarvam_price(usage)
     summary = {
         "call_id": record.get("call_id") or "",
         "started_at": record.get("started_at") or "",
         "date": row.get("Call date") or "",
         "time": row.get("Call time") or "",
-        "cost": None if cost is None else round(float(cost), 2),
-        "price": _price(usage),
+        "cost": cost,
+        "price": price,
         "recording": record.get("recording") or None,
     }
     for heading, key in _DETAIL_FIELDS:
@@ -86,41 +131,78 @@ def summarize(record: dict, sheet_row: dict | None = None) -> dict:
     return summary
 
 
-def _rupees(part) -> float | None:
-    if not isinstance(part, dict):
+def _number(value) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    amount = part.get("inr_with_gst")
-    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
-        return None
-    return round(float(amount), 2)
+    return float(value)
 
 
-def _price(usage: dict) -> dict | None:
-    """The GST-inclusive parts already stored with the call. Nothing is priced again."""
+def _part_amount(quantity, rate, stored) -> float:
+    """The current Sarvam price for a stored quantity. An old ex-GST amount is the fallback."""
+    measured = _number(quantity)
+    if measured is not None:
+        return priced(measured, rate)["inr_ex_gst"] or 0.0
+    if isinstance(stored, dict):
+        saved = _number(stored.get("inr_ex_gst"))
+        if saved is not None:
+            return saved
+    return 0.0
+
+
+def _model_amount(model) -> float | None:
+    """Sarvam 105B from the stored token counts. A call without tokens keeps its ex-GST amount."""
+    if not isinstance(model, dict):
+        return None
+    prompt = model.get("prompt_tokens")
+    completion = model.get("completion_tokens")
+    if isinstance(prompt, int) and not isinstance(prompt, bool) and isinstance(completion, int) and not isinstance(completion, bool):
+        cached = model.get("cached_tokens")
+        cached_billed = cached if isinstance(cached, int) and not isinstance(cached, bool) else 0
+        fresh = max(prompt - cached_billed, 0)
+        return (
+            fresh * INPUT_INR_PER_TOKEN
+            + cached_billed * CACHED_INR_PER_TOKEN
+            + completion * OUTPUT_INR_PER_TOKEN
+        )
+    return _number(model.get("inr_ex_gst"))
+
+
+def _sarvam_price(usage: dict) -> tuple[dict | None, float | None]:
+    """The ex-GST Sarvam amount. A call with no measured parts keeps its stored ex-GST total."""
     voice = usage.get("bulbul") if isinstance(usage.get("bulbul"), dict) else None
     heard = usage.get("speech_to_text") if isinstance(usage.get("speech_to_text"), dict) else None
     translated = usage.get("translation") if isinstance(usage.get("translation"), dict) else None
     if voice is None and heard is None and translated is None:
-        return None
+        saved = _number(usage.get("inr_ex_gst"))
+        return None, None if saved is None else round(saved, 2)
+    voice_amount = _part_amount((voice or {}).get("characters") or 0, BULBUL_INR_PER_CHARACTER, voice)
+    speech_amount = _part_amount((heard or {}).get("seconds"), STT_INR_PER_SECOND, heard)
+    translation_amount = _part_amount(
+        (translated or {}).get("characters") or 0,
+        TRANSLATE_INR_PER_CHARACTER,
+        translated,
+    )
+    amounts = [voice_amount, speech_amount, translation_amount]
     price = {
         "voice": {
-            "characters": int(voice.get("characters") or 0) if voice else 0,
-            "inr": _rupees(voice) or 0.0,
+            "characters": int((voice or {}).get("characters") or 0),
+            "inr": round(voice_amount, 2),
         },
         "speech_to_text": {
-            "seconds": heard.get("seconds") if heard else None,
-            "inr": _rupees(heard) or 0.0,
+            "seconds": None if heard is None else heard.get("seconds"),
+            "inr": round(speech_amount, 2),
         },
         "translation": {
-            "characters": int(translated.get("characters") or 0) if translated else 0,
-            "inr": _rupees(translated) or 0.0,
+            "characters": int((translated or {}).get("characters") or 0),
+            "inr": round(translation_amount, 2),
         },
     }
     model = usage.get("language_model") if isinstance(usage.get("language_model"), dict) else None
-    model_inr = _rupees(model)
-    if model_inr:
-        price["model"] = {"inr": model_inr}
-    return price
+    model_amount = _model_amount(model)
+    if model_amount:
+        amounts.append(model_amount)
+        price["model"] = {"inr": round(model_amount, 2)}
+    return price, round(sum(amounts), 2)
 
 
 def _turn(turn: dict) -> dict:

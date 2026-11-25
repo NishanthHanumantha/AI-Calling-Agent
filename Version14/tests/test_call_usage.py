@@ -155,7 +155,7 @@ def test_one_bulbul_text_records_its_characters(monkeypatch):
     finally:
         app_v3.SARVAM_API_KEY = previous
     assert server.call_log.turns[-1]["bulbul_characters"] == len("Hello there.")
-    assert server.call_log.usage()["bulbul"]["inr_ex_gst"] == round(len("Hello there.") * 1 / 1000, 4)
+    assert server.call_log.usage()["bulbul"]["inr_ex_gst"] == round(len("Hello there.") * 2 / 1000, 4)
 
 
 def test_a_price_question_is_labelled_from_the_project_card():

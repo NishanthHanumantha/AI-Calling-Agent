@@ -77,33 +77,46 @@ def stakeholder_allowed(request: Request) -> bool:
 
 def _gate_page(next_path: str, rejected: bool = False) -> HTMLResponse:
     safe = next_path if next_path in {"/", "/calls"} else "/"
-    message = "That passphrase is not the one for this review." if rejected else ""
+    message = "That password is not the one for this review." if rejected else ""
+    error = f'<p class="error">{message}</p>' if message else ""
     body = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Version 14 review</title>
+  <title>Sobha AI Calling Agent</title>
   <style>
     body {{ margin: 0; min-height: 100vh; display: grid; place-items: center;
-      font-family: "Segoe UI", sans-serif; background: #f3f0e8; color: #1c1915; }}
-    form {{ width: min(420px, calc(100% - 2rem)); background: #fff; border: 1px solid #e4dccb;
-      border-radius: 16px; padding: 1.4rem; }}
-    h1 {{ margin: 0 0 0.4rem; font-family: Georgia, serif; font-size: 1.6rem; font-weight: 600; }}
-    p {{ margin: 0 0 1rem; color: #6b645b; }}
-    input {{ width: 100%; padding: 0.7rem 0.8rem; border: 1px solid #e4dccb; border-radius: 10px; font: inherit; }}
-    button {{ margin-top: 0.8rem; background: #1f4e79; color: #fff; border: 0; border-radius: 999px;
-      padding: 0.55rem 1rem; font: inherit; font-weight: 650; cursor: pointer; }}
+      font-family: "Segoe UI", sans-serif; color: #1c1915;
+      background:
+        radial-gradient(820px 380px at 50% -8%, #e4eee6 0%, rgba(244, 241, 234, 0) 68%),
+        #f3efe6; }}
+    form {{ width: min(440px, calc(100% - 2rem)); background: #fff; border: 1px solid #e8e1d4;
+      border-radius: 24px; padding: 2.2rem 1.8rem 1.7rem;
+      box-shadow: 0 24px 60px rgba(28, 25, 21, 0.08); }}
+    .rule {{ display: block; width: 2.4rem; height: 2px; margin: 0 0 1.1rem; background: #b8956a; }}
+    h1 {{ margin: 0 0 0.65rem; font-family: Georgia, "Times New Roman", serif; font-weight: 500;
+      font-size: 2rem; letter-spacing: -0.03em; line-height: 1.15; }}
+    p {{ margin: 0 0 1.25rem; color: #5c564e; line-height: 1.5; }}
+    input {{ box-sizing: border-box; width: 100%; padding: 0.85rem 0.95rem; border: 1px solid #e4dccb;
+      border-radius: 14px; font: inherit; background: #fbfaf7; }}
+    input:focus {{ outline: 2px solid #1b4332; border-color: transparent; }}
+    button {{ width: 100%; margin-top: 0.95rem; background: #1b4332; color: #fff; border: 0;
+      border-radius: 999px; padding: 0.8rem 1.25rem; font: inherit; font-weight: 600; cursor: pointer;
+      box-shadow: 0 10px 22px rgba(27, 67, 50, 0.22); }}
+    button:hover {{ background: #16382a; }}
+    .error {{ margin: 0.9rem 0 0; color: #8c3a32; }}
   </style>
 </head>
 <body>
   <form method="post" action="/local/enter">
-    <h1>Version 14</h1>
-    <p>Enter the review passphrase to talk to the agent.</p>
+    <span class="rule"></span>
+    <h1>Sobha AI Calling Agent</h1>
+    <p>Enter the review password to talk to the agent.</p>
     <input type="hidden" name="next" value="{safe}">
     <input type="password" name="passphrase" autocomplete="current-password" required>
-    <button type="submit">Open the call</button>
-    <p>{message}</p>
+    <button type="submit">Continue</button>
+    {error}
   </form>
 </body>
 </html>"""
@@ -1036,7 +1049,7 @@ def _voice_headers(started: float, voice: str, extra: dict | None = None) -> dic
     return headers
 
 
-def clip_has_speech(audio: bytes, min_seconds: float = 0.45) -> bool:
+def clip_has_speech(audio: bytes, min_seconds: float = 0.25) -> bool:
     """True when a clip rises above the room for long enough to be the customer."""
     try:
         with wave.open(io.BytesIO(audio), "rb") as wav:
@@ -1058,13 +1071,13 @@ def clip_has_speech(audio: bytes, min_seconds: float = 0.45) -> bool:
         levels.append((energy ** 0.5) / 32768.0)
     if not levels:
         return False
-    quiet = [level for level in levels if level < 0.05]
+    quiet = [level for level in levels if level < 0.03]
     if len(quiet) >= 3:
         ordered = sorted(quiet)
         floor = ordered[len(ordered) // 2]
-        threshold = max(0.05, floor * 3)
+        threshold = max(0.03, floor * 3)
     else:
-        threshold = 0.05
+        threshold = 0.03
     loud = sum(1 for level in levels if level > threshold)
     return (loud * frame_n / rate) >= min_seconds
 
@@ -1213,9 +1226,40 @@ def unanswered_greeting(text):
     return True
 
 
+def _agent_log(hypothesis_id: str, message: str, data: dict) -> None:
+    # #region agent log
+    payload = {
+        "sessionId": "b89e8b",
+        "hypothesisId": hypothesis_id,
+        "location": "server.py",
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+        "runId": "post-fix",
+    }
+    line = json.dumps(payload) + "\n"
+    for path in (
+        Path(r"c:\Users\nishanth.h\ai-calling-agent\.cursor\debug-b89e8b.log"),
+        Path(__file__).resolve().parent / "debug-b89e8b.ndjson",
+    ):
+        try:
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+        except OSError:
+            pass
+    # #endregion
+
+
 def transcribe_clip(audio: bytes, heard: str = "1") -> dict:
     """Saaras on one clip. The browser speech service is not used."""
     if len(audio) < 800 or not clip_has_speech(audio):
+        # #region agent log
+        _agent_log("B", "listen dropped before speech service", {
+            "reason": "too_small" if len(audio) < 800 else "no_speech",
+            "bytes": len(audio),
+            "heard": str(heard),
+        })
+        # #endregion
         return {"text": ""}
     if not app_v3.SARVAM_API_KEY:
         return {"text": "", "error": "Speech transcription is not configured."}
@@ -1245,20 +1289,53 @@ def transcribe_clip(audio: bytes, heard: str = "1") -> dict:
     body = response.json()
     transcript = (body.get("transcript") or "").strip()
     if transcript_is_only_keyterms(transcript):
+        # #region agent log
+        _agent_log("C", "listen dropped", {"reason": "keyterms", "chars": len(transcript)})
+        # #endregion
         return {"text": ""}
     if mostly_echo(transcript, app_v3.conversation_memory.get("last_spoken_reply")):
         print("DROPPED ECHO:", transcript, flush=True)
+        # #region agent log
+        _agent_log("C", "listen dropped", {"reason": "echo", "chars": len(transcript), "heard_text": transcript[:80]})
+        # #endregion
         return {"text": ""}
     if unanswered_greeting(transcript):
         print("DROPPED GREETING:", transcript, flush=True)
+        # #region agent log
+        _agent_log("C", "listen dropped", {"reason": "greeting", "chars": len(transcript), "heard_text": transcript[:80]})
+        # #endregion
         return {"text": ""}
     if str(heard) == "0" and lone_yes(transcript):
+        # #region agent log
+        _agent_log("C", "listen dropped", {"reason": "lone_yes", "chars": len(transcript)})
+        # #endregion
         return {"text": ""}
     if transcript:
         app_v3.note_detected_language(body.get("language_code"), transcript)
         call_log.note_stt(transcript, int((time.perf_counter() - started) * 1000))
         call_log.note_clip(audio)
+    # #region agent log
+    _agent_log("C", "listen kept" if transcript else "listen empty transcript", {
+        "reason": "kept" if transcript else "empty",
+        "chars": len(transcript),
+        "heard_text": transcript[:80],
+    })
+    # #endregion
     return {"text": transcript}
+
+
+@local_app.post("/local/debug")
+async def local_debug(request: Request):
+    """Browser listening trace for this review. It does not choose a spoken line."""
+    try:
+        body = await request.json()
+    except Exception:
+        return Response(status_code=204)
+    if isinstance(body, dict):
+        # #region agent log
+        _agent_log(str(body.get("hypothesisId") or "A"), str(body.get("message") or "client"), body.get("data") if isinstance(body.get("data"), dict) else {})
+        # #endregion
+    return Response(status_code=204)
 
 
 @local_app.post("/local/listen")

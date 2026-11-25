@@ -27,7 +27,7 @@ def _write(folder: Path, call_id: str, **extra) -> None:
                 "source": "language model, chat",
             },
         ],
-        "usage": {"inr_with_gst": 0.44},
+        "usage": {"inr_ex_gst": 0.44},
         "recording": None,
     }
     record.update(extra)
@@ -54,6 +54,33 @@ def test_the_list_uses_the_sales_sheet_and_leaves_recording_empty(tmp_path):
     assert listed[0]["cost"] == 0.44
     assert listed[0]["recording"] is None
     assert listed[0]["phone"] == ""
+
+
+def test_a_call_that_stops_at_the_name_stays_off_the_list(tmp_path):
+    _write(
+        tmp_path,
+        "20261125T123351Z",
+        details={
+            "Customer name": "Written",
+            "Project": "Not discussed",
+            "Part of Bengaluru": "Not discussed",
+            "Site visit": "Not discussed",
+        },
+    )
+    _write(
+        tmp_path,
+        "20261125T093555Z",
+        details={
+            "Customer name": "Prasanna",
+            "Project": "Not discussed",
+            "Part of Bengaluru": "South",
+            "Configuration": "3 BHK",
+        },
+    )
+
+    listed = list_calls(tmp_path, tmp_path / "missing.xlsx")
+
+    assert [call["name"] for call in listed] == ["Prasanna"]
 
 
 def test_opening_a_call_keeps_the_spoken_order_and_who_wrote_the_reply(tmp_path):
@@ -125,6 +152,14 @@ def test_a_response_average_uses_only_the_answered_turn(tmp_path):
 
 
 def test_a_saved_price_keeps_the_three_parts(tmp_path):
+    from local_call.usage_note import (
+        BULBUL_INR_PER_CHARACTER,
+        STT_INR_PER_SECOND,
+        priced,
+    )
+
+    voice = priced(867, BULBUL_INR_PER_CHARACTER)["inr_ex_gst"]
+    speech = priced(24.833, STT_INR_PER_SECOND)["inr_ex_gst"]
     _write(
         tmp_path,
         "20261123T122935Z",
@@ -140,10 +175,10 @@ def test_a_saved_price_keeps_the_three_parts(tmp_path):
 
     opened = load_call(tmp_path, "20261123T122935Z", tmp_path / "missing.xlsx")
 
-    assert opened["cost"] == 1.26
-    assert opened["price"]["voice"] == {"characters": 867, "inr": 1.02}
+    assert opened["cost"] == round(voice + speech, 2)
+    assert opened["price"]["voice"] == {"characters": 867, "inr": round(voice, 2)}
     assert opened["price"]["speech_to_text"]["seconds"] == 24.833
-    assert opened["price"]["speech_to_text"]["inr"] == 0.24
+    assert opened["price"]["speech_to_text"]["inr"] == round(speech, 2)
     assert opened["price"]["translation"] == {"characters": 0, "inr": 0.0}
     assert "model" not in opened["price"]
     assert opened["project"] == "SOBHA Valley View"

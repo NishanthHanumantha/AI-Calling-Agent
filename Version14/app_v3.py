@@ -1133,6 +1133,9 @@ def generate_response(user_query, intent, brochure_context, top_score):
             )
             spoken = _amenity_facts_only(spoken) or AMENITY_NOT_CONFIRMED
         spoken = drop_unasked_amenity_question(user_query, spoken)
+        spoken = drop_unasked_place_question(user_query, spoken)
+        if intent != "amenities":
+            spoken = keep_written_facts(spoken, _project_fact_source(brochure_context))
         spoken = leave_closed_configuration(user_query, spoken)
         spoken = drop_false_configuration_claim(spoken)
         spoken = leave_blocked_topics(spoken)
@@ -1178,6 +1181,34 @@ def is_bare_okay(text):
     return cleaned in {
         "ok", "okay", "ah okay", "ah ok", "okay okay", "ok ok", "ok okay", "okay ok",
     }
+
+
+def is_script_acknowledgement(text):
+    """Okay, fine, or you can proceed, with no new question in the same turn."""
+    raw = text or ""
+    if "?" in raw:
+        return False
+    if re.search(
+        r"\b(what|where|when|which|how|who|why|tell|about|price|size|area|"
+        r"location|project|bhk|visit)\b",
+        raw,
+        re.I,
+    ):
+        return False
+    cleaned = re.sub(r"[^a-z\s]", " ", raw.lower())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if re.fullmatch(
+        r"(?:(?:yeah|yes|yep|ok|okay|sure|alright|fine)\s+)*you can proceed",
+        cleaned,
+    ):
+        return True
+    words = cleaned.split()
+    if not words or len(words) > 4:
+        return False
+    allowed = {"ok", "okay", "fine", "yeah", "yes", "yep", "sure", "alright"}
+    if not all(word in allowed for word in words):
+        return False
+    return any(word in {"ok", "okay", "fine"} for word in words)
 
 
 def approves_the_price(text):
@@ -2280,6 +2311,317 @@ def move_on_line():
     return follow_on("That's alright.")
 
 
+def _script_question_line():
+    """The next script question. A second fallback offers the visit."""
+    line = follow_on("")
+    if line is OFFER_THE_VISIT:
+        conversation_memory["visit_offered"] = True
+        conversation_memory["stage"] = "propose_slot"
+        return visit_schedule_question()
+    return line
+
+
+def _spoken_acknowledgement():
+    """Okay, fine, or you can proceed moves to the next script question."""
+    line = move_on_line()
+    if line is OFFER_THE_VISIT:
+        conversation_memory["visit_offered"] = True
+        conversation_memory["stage"] = "propose_slot"
+        return visit_schedule_question()
+    return line
+
+
+_FACT_MONTHS = (
+    "january|february|march|april|may|june|july|august|"
+    "september|october|november|december"
+)
+FACT_NOT_CONFIRMED = "That is not confirmed."
+
+
+def _strict_fact_question(text):
+    """A question about area, an unnamed place, a time, or a date."""
+    raw = text or ""
+    if re.search(r"\b(visit|callback|call me back|call back)\b", raw, re.I):
+        return None
+    asks = re.search(r"\b(what|which|how|when|where)\b|\?", raw, re.I) is not None
+    if not asks and not re.search(r"\b(metro|mall|landmark)\b", raw, re.I):
+        return None
+    if catalog.part_of_city(raw) and not re.search(
+        r"\b(metro|mall|landmark|how far|how long)\b", raw, re.I
+    ):
+        return None
+    if re.search(r"\bexact location\b", raw, re.I):
+        return None
+    if re.search(
+        r"\b(carpet|built[\s-]?up|building area|super area|unit size|size range|"
+        r"how big|how large|square feet|sq\.?\s*ft|carpet area|exact area|building size)\b",
+        raw,
+        re.I,
+    ) or re.search(r"\b(?:what|which)\b.{0,40}\b(?:size|area)\b", raw, re.I):
+        return "area"
+    if re.search(
+        r"\b(when|what date|which date|how long|how many minutes|possession date)\b",
+        raw,
+        re.I,
+    ) or re.search(rf"\b(?:{_FACT_MONTHS}|20\d{{2}})\b", raw, re.I):
+        return "date"
+    if re.search(r"\b\d+\s*-?\s*(?:minutes?|hours?)\b", raw, re.I):
+        return "time"
+    if _specific_names(raw) or re.search(r"\b(metro|mall|landmark|landmarks)\b", raw, re.I):
+        return "place"
+    return None
+
+
+def _stored_place_text():
+    parts = []
+    for project in catalog.PROJECTS:
+        for value in (
+            project.get("spoken"),
+            project.get("place"),
+            project.get("location"),
+            project.get("theme"),
+        ):
+            if value:
+                parts.append(value.lower())
+        if project.get("part"):
+            parts.append(f"{project['part']} bengaluru")
+    parts.append(str(PROJECT_KB.get("location") or "").lower())
+    return parts
+
+
+def _specific_names(text):
+    """Place names in the customer's words that are not already on a project card."""
+    found = re.findall(
+        r"\b(?:[A-Z]{2,}|[A-Z][a-z]+)(?:\s+(?:[A-Z]{2,}|[A-Z][a-z]+))+\b",
+        text or "",
+    )
+    stored = _stored_place_text()
+    names = []
+    for name in found:
+        low = name.lower()
+        if re.search(r"\b(bhk|luxe|grande)\b", low):
+            continue
+        if any(low in item or item in low for item in stored):
+            continue
+        names.append(low)
+    return names
+
+
+def _unguarded_place_words(text):
+    """Lower-case place words the customer used that are not already on a card."""
+    skip = {
+        "metro", "mall", "landmark", "landmarks", "where", "location", "located",
+        "near", "nearby", "distance", "walk", "walking", "connectivity", "road",
+        "minute", "minutes", "hour", "hours", "about", "there", "project",
+        "would", "could", "please", "which", "what", "when", "from", "close",
+        "closer", "around", "going", "looking", "building", "exact", "area",
+        "size", "sobha", "bengaluru", "bangalore", "magnus", "homes", "home",
+    }
+    stored = " ".join(_stored_place_text())
+    words = []
+    for word in re.findall(r"[a-z]{5,}", (text or "").lower()):
+        if word in STOPWORDS or word in skip or word in stored:
+            continue
+        words.append(word)
+    return words
+
+
+def _norm_fact(text):
+    text = (text or "").lower()
+    text = text.replace("sq. ft.", "sq ft").replace("sq.ft.", "sq ft")
+    text = text.replace("square feet", "sq ft").replace("square foot", "sq ft")
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _fact_markers(sentence):
+    markers = re.findall(r"\b\d{3,5}\b", sentence or "")
+    markers += [
+        item.lower()
+        for item in re.findall(rf"\b(?:{_FACT_MONTHS}|20\d{{2}})\b", sentence or "", flags=re.I)
+    ]
+    for match in re.finditer(r"\b(\d+)\s*-?\s*(minutes?|hours?)\b", sentence or "", re.I):
+        markers.append(match.group(1))
+        markers.append(match.group(2).lower()[:6])
+    markers += _specific_names(sentence)
+    for word in ("metro", "mall", "landmark", "landmarks"):
+        if re.search(rf"\b{word}\b", sentence or "", re.I):
+            markers.append(word)
+    return markers
+
+
+def _checked_fact(sentence):
+    if re.search(r"\b(sq\.?\s*ft|square feet|carpet|built[\s-]?up|acres?)\b", sentence or "", re.I) and re.search(
+        r"\d{3,5}", sentence or ""
+    ):
+        return "area"
+    if re.search(r"\b\d+\s*-?\s*(?:minutes?|hours?)\b", sentence or "", re.I):
+        return "time"
+    if re.search(rf"\b(?:{_FACT_MONTHS}|20\d{{2}})\b", sentence or "", re.I):
+        return "date"
+    if _specific_names(sentence) or re.search(r"\b(metro|mall|landmark|landmarks)\b", sentence or "", re.I):
+        return "place"
+    return None
+
+
+def _sentence_appears(sentence, source):
+    needle = _norm_fact(sentence)
+    if len(needle) < 12:
+        return False
+    return needle in _norm_fact(source)
+
+
+def _facts_are_written(sentence, source):
+    """The area, place, time, or date in this sentence is written in the source."""
+    if _sentence_appears(sentence, source):
+        return True
+    needed = _fact_markers(sentence)
+    if not needed:
+        return False
+    blob = (source or "").lower()
+    return all(item in blob for item in needed)
+
+
+def keep_written_facts(answer, source):
+    """Drop an area, place, time, or date sentence that is not written in the source."""
+    kept = []
+    dropped = False
+    for sentence in split_sentences(answer or ""):
+        if not _checked_fact(sentence):
+            kept.append(sentence)
+            continue
+        if _facts_are_written(sentence, source):
+            kept.append(sentence)
+        else:
+            dropped = True
+    leftover = " ".join(kept).strip()
+    if dropped and not any(_checked_fact(sentence) for sentence in kept):
+        if leftover:
+            return f"{leftover} {FACT_NOT_CONFIRMED}"
+        return FACT_NOT_CONFIRMED
+    return leftover
+
+
+def drop_unasked_place_question(user_query, answer):
+    """Drop a follow-up question about a place the customer did not name."""
+    asked_names = set(_specific_names(user_query))
+    asked_words = set()
+    for word in (
+        "metro", "mall", "landmark", "landmarks", "where", "location",
+        "located", "near", "distance", "walk", "connectivity",
+    ):
+        if re.search(rf"\b{word}\b", user_query or "", re.I):
+            asked_words.add(word)
+    place_words = (
+        "metro", "mall", "landmark", "landmarks", "where", "location",
+        "located", "near", "nearby", "distance", "walk", "walking",
+        "connectivity", "road",
+    )
+    kept = []
+    for sentence in split_sentences(answer or ""):
+        if "?" not in sentence:
+            kept.append(sentence)
+            continue
+        names = set(_specific_names(sentence))
+        words = {
+            word for word in place_words if re.search(rf"\b{word}\b", sentence, re.I)
+        }
+        if names - asked_names or words - asked_words:
+            continue
+        kept.append(sentence)
+    return " ".join(kept).strip()
+
+
+def _written_area_from_cards():
+    lines = []
+    for project in _focused_projects():
+        if (project.get("size_band") or "").strip():
+            lines.append(_home_line(project, include_size=True))
+    return " ".join(lines).strip()
+
+
+def _project_fact_source(brochure_context):
+    cards = "\n".join(catalog.card(project) for project in _focused_projects())
+    kb = ""
+    if any(project["id"] == "sobha-townpark" for project in _focused_projects()):
+        kb = " ".join(str(value) for value in PROJECT_KB.values())
+    return f"{brochure_context or ''}\n{cards}\n{kb}"
+
+
+def _written_fact(kind, user_text, source):
+    """One sentence copied from the brochure or the card, or nothing."""
+    if kind == "area":
+        written = _written_area_from_cards()
+        if written:
+            return written
+    sentences = [item.strip() for item in split_sentences(source or "") if item.strip()]
+    needed = [item.lower() for item in _specific_names(user_text)]
+    needed += _unguarded_place_words(user_text)
+    needed += [
+        item.lower()
+        for item in re.findall(rf"\b(?:{_FACT_MONTHS}|20\d{{2}})\b", user_text or "", flags=re.I)
+    ]
+    for match in re.finditer(r"\b(\d+)\s*-?\s*(minutes?|hours?)\b", user_text or "", re.I):
+        needed.append(match.group(1))
+        needed.append(match.group(2).lower()[:6])
+    for word in ("metro", "mall", "landmark", "landmarks"):
+        if re.search(rf"\b{word}\b", user_text or "", re.I):
+            needed.append(word)
+    if kind == "area":
+        for sentence in sentences:
+            if re.search(r"\b(size|sq\.?\s*ft|carpet|area)\b", sentence, re.I) and re.search(
+                r"\d{3,5}", sentence
+            ):
+                return sentence
+        return None
+    if not needed:
+        return None
+    blob = _norm_fact(source)
+    if any(item not in blob for item in needed):
+        return None
+    for sentence in sentences:
+        low = sentence.lower()
+        if all(item in low for item in needed):
+            return sentence
+    return None
+
+
+def _answer_strict_fact(user_text, kind):
+    """Speak the written sentence. An unwritten area, place, time, or date is not confirmed."""
+    if kind == "area":
+        written = _written_area_from_cards()
+        if written:
+            return written
+    _load_focus_brochures(_focused_projects())
+    brochure_context, _score = retrieve_context(
+        "floorplan" if kind == "area" else "location",
+        turn_query(user_text),
+    )
+    return _written_fact(kind, user_text, _project_fact_source(brochure_context)) or FACT_NOT_CONFIRMED
+
+
+def _statement(text):
+    return " ".join(sentence for sentence in split_sentences(text or "") if "?" not in sentence)
+
+
+def repeats_previous_answer(answer):
+    """The same fact as the line just spoken."""
+    new_text = _norm_fact(_statement(answer))
+    old_text = _norm_fact(_statement(conversation_memory.get("last_spoken_reply") or ""))
+    if not new_text or not old_text:
+        return False
+    if new_text == old_text:
+        return True
+    new = _content_words(new_text)
+    old = _content_words(old_text)
+    if len(new) < 4 or not old:
+        return False
+    if len(old) > int(len(new) * 1.5) + 2:
+        return False
+    shared = sum(1 for word in new if word in set(old))
+    return shared / len(new) >= 0.75
+
+
 def topic_of_text(text):
     """The fact a line is about, if it is one of these."""
     last = (text or "").lower()
@@ -3362,6 +3704,8 @@ def _brochure_amenity_answer(user_text, brochure_context, top_score):
 
 def grounded_reply(user_text):
     """One spoken answer from the customer's words. Does not change the stage."""
+    if is_script_acknowledgement(user_text):
+        return _spoken_acknowledgement()
     card = reply_from_active_cards(user_text)
     if card:
         return card
@@ -3379,10 +3723,19 @@ def grounded_reply(user_text):
         ]
         if focus:
             _load_focus_brochures(focus)
+    kind = _strict_fact_question(user_text)
+    if kind and intent != "amenities":
+        answer = _answer_strict_fact(user_text, kind)
+        if repeats_previous_answer(answer):
+            return _script_question_line()
+        return answer
     brochure_context, top_score = retrieve_context(intent, turn_query(user_text))
     if intent == "amenities" and _amenities_come_from_brochure():
         return _brochure_amenity_answer(user_text, brochure_context, top_score)
-    return generate_response(user_text, intent, brochure_context, top_score)
+    answer = generate_response(user_text, intent, brochure_context, top_score)
+    if repeats_previous_answer(answer):
+        return _script_question_line()
+    return answer
 
 
 def answer_in_place(user_text):
@@ -3395,6 +3748,8 @@ def answer_in_place(user_text):
 
 def answer_then_ask(user_text, question):
     """Answer an unmatched reply, then ask the open script question again."""
+    if is_script_acknowledgement(user_text) and conversation_memory.get("stage") != "greeting":
+        return response_for(move_on_line())
     answer = unmatched_model_answer(user_text)
     if not answer:
         return Response(content=qualification_twiml(question), media_type="application/xml")
@@ -4086,6 +4441,8 @@ def reply_from_active_cards(user_text):
         return None
     focus = _focused_projects()
     if len(focus) == 1 and focus[0]["id"] == "sobha-townpark":
+        return None
+    if _strict_fact_question(user_text):
         return None
     if _asks_for_a_price(user_text):
         return _remember_card("price", _price_for_named_home(user_text))
@@ -5047,6 +5404,7 @@ async def handle_speech(request: Request, SpeechResult: str = Form(default="")):
             is_positive(user_text)
             or available_to_talk(user_text)
             or agrees_to_talk_now(user_text)
+            or is_script_acknowledgement(user_text)
             or catalog.project_named_in(user_text)
         ):
             conversation_memory["stage"] = "qualify"

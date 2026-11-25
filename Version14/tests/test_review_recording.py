@@ -92,6 +92,6 @@ def test_the_passphrase_opens_the_review_and_rejects_another(monkeypatch):
 
     blocked = asyncio.run(stakeholder_gate(_request(), page))
     assert blocked.status_code == 200
-    assert b"passphrase" in blocked.body
+    assert b"Sobha AI Calling Agent" in blocked.body
     allowed = asyncio.run(stakeholder_gate(_request(token), page))
     assert allowed.body == b"open"

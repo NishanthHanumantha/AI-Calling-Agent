@@ -74,7 +74,7 @@ def test_one_call_shows_greeting_card_and_model(monkeypatch):
     assert turn["prompt_tokens"] is None
     assert greeting["trace"]["averages"]["model_ms"] is None
     assert greeting["trace"]["averages"]["script_ms"] == turn["decision_ms"]
-    assert greeting["trace"]["usage"]["rates_checked"] == "3 Nov 2026"
+    assert greeting["trace"]["usage"]["rates_checked"] == "25 Nov 2026"
     assert greeting["trace"]["usage"]["language_model"]["requests"] == 0
     assert greeting["trace"]["usage"]["language_model"]["inr_ex_gst"] == 0.0
 
