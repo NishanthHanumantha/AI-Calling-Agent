@@ -41,7 +41,7 @@ AREA_QUESTION = (
     "Which part of Bengaluru are you considering — North, East, or South?"
 )
 CONFIGURATION_QUESTION = "May I know which configuration you are interested in?"
-PURPOSE_QUESTION = "Are you looking at this to live in, or as an investment?"
+PURPOSE_QUESTION = "Are you looking at this for your own use, or as an investment?"
 
 
 def _shared_strings(book):

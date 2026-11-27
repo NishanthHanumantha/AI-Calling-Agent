@@ -783,7 +783,7 @@ def test_flexible_yes_closes_the_size_and_the_next_reply_leaves_it():
     assert app_v3.conversation_memory["size_closed_before_turn"] is True
     low = spoken.lower()
     assert "keep the grande 2 bhk range" in low
-    assert "live in" in low
+    assert "own use" in low
     assert "larger" not in low
     assert "smaller" not in low
     assert "what else would you like to know" not in low
@@ -809,7 +809,7 @@ def test_flexible_yes_closes_the_size_and_the_next_reply_leaves_it():
     assert "larger" not in low
     assert "sq" not in low
     assert "what else would you like to know" not in low
-    assert "live in" in low
+    assert "own use" in low
 
 
 def test_fine_with_both_ranges_leaves_the_size_open():
@@ -830,14 +830,14 @@ def test_fine_with_both_ranges_leaves_the_size_open():
     low = spoken.lower()
     assert "leave the size open" in low
     assert "grande" not in low
-    assert "live in" in low
+    assert "own use" in low
 
 
 def test_for_living_is_the_purpose_line():
     app_v3.conversation_memory.update({
         "stage": "answer_faq",
         "customer_configuration": "2 BHK",
-        "last_agent_question": "Are you looking at this to live in, or as an investment?",
+        "last_agent_question": "Are you looking at this for your own use, or as an investment?",
     })
     spoken, _, stage = _turn("It's for living.")
     assert CALLS == []
@@ -869,7 +869,7 @@ def test_fine_with_both_confirms_the_four_bhk_range_on_the_same_turn():
     assert app_v3.conversation_memory["size_closed_before_turn"] is True
     low = spoken.lower()
     assert "keep the grande 4 bhk range" in low
-    assert "live in" in low
+    assert "own use" in low
     assert "larger" not in low
     assert "smaller" not in low
     assert "what else would you like to know" not in low
@@ -888,7 +888,7 @@ def test_unsure_about_configuration_size_and_budget_moves_on():
     assert "configuration" in app_v3.conversation_memory["open_topics"]
     low = spoken.lower()
     assert "leave the configuration open" in low
-    assert "live in" in low
+    assert "own use" in low
     assert "which configuration" not in low
     assert "one, two, three" not in low
 
@@ -909,7 +909,7 @@ def test_unsure_about_configuration_size_and_budget_moves_on():
     assert "size" in app_v3.conversation_memory["open_topics"]
     low = spoken.lower()
     assert "leave the size open" in low
-    assert "live in" in low
+    assert "own use" in low
     assert "sq" not in low
     assert "larger" not in low
 
@@ -937,7 +937,7 @@ def test_investment_is_acknowledged_without_the_model():
         "customer_variant": "Grande",
         "size_decided": True,
         "covered_topics": ["location", "configuration"],
-        "last_agent_question": "Are you looking at this to live in, or as an investment?",
+        "last_agent_question": "Are you looking at this for your own use, or as an investment?",
     })
     spoken, _, stage = _turn("It's for an investment purpose.")
     assert CALLS == []
@@ -981,7 +981,7 @@ def test_later_not_sure_does_not_ask_the_stored_size_again():
     assert "larger" not in low
     assert "grande" not in low
     assert "what else would you like to know" not in low
-    assert "live in" in low or "kind of home" in low
+    assert "own use" in low or "kind of home" in low
 
 
 def test_need_some_time_still_ends_the_call():
@@ -1000,7 +1000,7 @@ def test_open_configuration_is_not_asked_again():
     app_v3.conversation_memory.update({
         "stage": "answer_faq",
         "open_topics": ["configuration"],
-        "last_agent_question": "Are you looking at this to live in, or as an investment?",
+        "last_agent_question": "Are you looking at this for your own use, or as an investment?",
     })
     REPLIES["To live in."] = (
         "Living in it makes sense. We have 1, 2, 3 and 4 BHK options here. "
@@ -1172,7 +1172,7 @@ def test_greeting_location_is_not_offered_again():
         "stage": "answer_faq",
         "open_topics": ["configuration"],
         "customer_purpose": None,
-        "last_agent_question": "Are you looking at this to live in, or as an investment?",
+        "last_agent_question": "Are you looking at this for your own use, or as an investment?",
     })
     REPLIES["To live in."] = (
         "Living in is the perfect fit for SOBHA Townpark. "
@@ -1561,7 +1561,7 @@ def test_investment_after_the_greeting_asks_the_price():
     app_v3.conversation_memory.update({
         "stage": "answer_faq",
         "open_topics": ["configuration"],
-        "last_agent_question": "Are you looking at this to live in, or as an investment?",
+        "last_agent_question": "Are you looking at this for your own use, or as an investment?",
     })
     spoken, _, stage = _turn("It's for an investment purpose.")
     assert CALLS == []
@@ -1579,7 +1579,7 @@ def test_investment_after_the_greeting_asks_the_price():
         "stage": "answer_faq",
         "covered_topics": ["location", "home", "price"],
         "price_stated": True,
-        "last_agent_question": "Are you looking at this to live in, or as an investment?",
+        "last_agent_question": "Are you looking at this for your own use, or as an investment?",
     })
     spoken, _, _ = _turn("It's for an investment purpose.")
     assert CALLS == []
@@ -1964,7 +1964,7 @@ def test_to_live_in_is_a_purpose_not_an_amenity():
     app_v3.conversation_memory.update({
         "stage": "answer_faq",
         "customer_configuration": "3 BHK",
-        "last_agent_question": "Are you looking at this to live in, or as an investment?",
+        "last_agent_question": "Are you looking at this for your own use, or as an investment?",
     })
     spoken, _, stage = _turn("It's to live in.")
     assert CALLS == []
@@ -2019,7 +2019,7 @@ def test_decide_later_leaves_the_size_open():
     low = spoken.lower()
     assert "leave the size open" in low
     assert "not listed" not in low
-    assert "live in" in low
+    assert "own use" in low
 
 
 def test_a_denial_of_listed_sizes_is_replaced():
@@ -2073,7 +2073,7 @@ def test_a_saturday_sentence_is_confirmed_as_the_day():
 _PURPOSE = {
     "customer_configuration": "2 BHK",
     "configuration_asked": True,
-    "last_agent_question": "Are you looking at this to live in, or as an investment?",
+    "last_agent_question": "Are you looking at this for your own use, or as an investment?",
 }
 _VISIT = {
     "visit_offered": True,
@@ -2154,7 +2154,7 @@ def test_naming_townpark_locks_that_project():
     assert CALLS == []
     assert "okay nishanth" in spoken.lower()
     assert "stay with sobha townpark" in spoken.lower()
-    assert "live in" in spoken.lower()
+    assert "own use" in spoken.lower()
     spoken, _, stage = _turn("It is for my own use.")
     assert stage == "answer_faq"
     assert "1.65 crore" in spoken.lower()
@@ -2172,6 +2172,24 @@ def test_a_declined_name_still_asks_the_area():
     assert "okay" not in low
     assert "part of bengaluru" in low
     assert app_v3.conversation_memory["customer_name"] is None
+
+
+def test_a_yeah_before_the_introduction_keeps_only_the_name():
+    app_v3.conversation_memory.update({"stage": "greeting"})
+    _turn("Yes.")
+    spoken, _, stage = _turn("Yeah, I'm Prashant.")
+    assert CALLS == []
+    assert stage == "qualify"
+    assert app_v3.conversation_memory["customer_name"] == "Prashant"
+    assert "okay prashant" in spoken.lower()
+    assert "i'm prashant" not in spoken.lower()
+    app_v3.reset_memory()
+    app_v3.conversation_memory.update({"stage": "greeting"})
+    _turn("Yes.")
+    spoken, _, stage = _turn("Yeah, my name is Prashant.")
+    assert CALLS == []
+    assert app_v3.conversation_memory["customer_name"] == "Prashant"
+    assert "okay prashant" in spoken.lower()
 
 
 def test_a_bare_yes_continues_without_a_name():
@@ -2472,7 +2490,7 @@ def test_east_bengaluru_is_kept_and_then_asks_the_places():
     assert app_v3.conversation_memory["customer_part"] == "East"
     assert "configuration" in spoken.lower()
     spoken, _, _stage = _turn("Three BHK.")
-    assert "live in" in spoken.lower()
+    assert "own use" in spoken.lower()
     spoken, _, stage = _turn("That's for investment purpose.")
     assert CALLS == []
     assert stage == "qualify"
@@ -2495,7 +2513,7 @@ def test_an_investment_answer_names_the_two_bedroom_match():
         "customer_bedrooms": 2,
         "customer_configuration": "2 BHK",
         "purpose_prompted": True,
-        "last_agent_question": "Are you looking at this to live in, or as an investment?",
+        "last_agent_question": "Are you looking at this for your own use, or as an investment?",
     })
     spoken, _, stage = _turn("I am looking for investment.")
     assert CALLS == []
@@ -2815,7 +2833,7 @@ def test_an_open_configuration_stays_with_apartments_and_one_world():
     assert CALLS == []
     assert app_v3.conversation_memory["configuration_skipped"] is True
     low = spoken.lower()
-    assert "live in" in low
+    assert "own use" in low
     assert "bedroom count" not in low
     assert "chikka" not in low
     spoken, _, _stage = _turn("It's to live in.")
@@ -3152,14 +3170,14 @@ def test_a_garbled_purpose_and_covering_both_gives_the_brief():
         "configuration_skipped": True,
         "purpose_prompted": True,
         "customer_part": "East",
-        "last_agent_question": "Are you looking at this to live in, or as an investment?",
+        "last_agent_question": "Are you looking at this for your own use, or as an investment?",
     })
     spoken, _, stage = _turn("IHT 11.")
     assert CALLS == []
     assert stage == "qualify"
     low = spoken.lower()
     assert "didn't catch" in low
-    assert "live in" in low
+    assert "own use" in low
     assert "that's good" not in low
     assert "whitefield" not in low
     spoken, _, _stage = _turn("It's to live in.")

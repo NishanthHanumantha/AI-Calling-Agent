@@ -202,7 +202,7 @@ def _open_configuration_call():
                 "customer": "I haven't decided on it.",
                 "reply": (
                     "That's alright, we can leave the configuration open. "
-                    "Are you looking at this to live in, or as an investment?"
+                    "Are you looking at this for your own use, or as an investment?"
                 ),
                 "stage": "answer_faq",
                 "stt_ms": 900,
@@ -269,7 +269,7 @@ def test_for_living_fits_the_purpose_question():
             {
                 "turn_index": 4,
                 "customer": "I'm fine with both.",
-                "reply": "Are you looking at this to live in, or as an investment?",
+                "reply": "Are you looking at this for your own use, or as an investment?",
                 "stage": "answer_faq",
             },
             {
@@ -298,7 +298,7 @@ def test_decide_later_fits_the_size_question():
                 "customer": "I will decide this later after seeing.",
                 "reply": (
                     "That's alright, we can leave the size open. "
-                    "Are you looking at this to live in, or as an investment?"
+                    "Are you looking at this for your own use, or as an investment?"
                 ),
                 "stage": "answer_faq",
             },
@@ -320,7 +320,7 @@ def test_fine_with_both_fits_the_size_question():
             {
                 "turn_index": 4,
                 "customer": "I'm fine with both.",
-                "reply": "That's alright. Are you looking at this to live in, or as an investment?",
+                "reply": "That's alright. Are you looking at this for your own use, or as an investment?",
                 "stage": "answer_faq",
             },
         ],
@@ -588,7 +588,7 @@ def test_speaking_style_follows_the_clause():
         "Would you like to schedule a site visit?",
         "I will have our sales advisor get in touch with you.",
         "Have a good day.",
-        "Are you looking at this to live in, or as an investment?",
+        "Are you looking at this for your own use, or as an investment?",
     )
     for line in lines:
         assert speaking_style(line) == (1.0, 0.6)
@@ -682,7 +682,7 @@ def test_a_project_name_and_tell_me_about_that_count_as_answers():
             {
                 "turn_index": 2,
                 "customer": "I'm looking up in Townpark, Bangalore.",
-                "reply": "Are you looking at this to live in, or as an investment?",
+                "reply": "Are you looking at this for your own use, or as an investment?",
                 "stage": "answer_faq",
             },
             {
@@ -759,7 +759,7 @@ def test_a_deferred_close_and_a_repeat_request_are_not_misses():
             {
                 "turn_index": 4,
                 "customer": "I haven't finalized that. I will let you know later.",
-                "reply": "Are you looking at this to live in, or as an investment?",
+                "reply": "Are you looking at this for your own use, or as an investment?",
                 "stage": "qualify",
             },
             {
@@ -785,7 +785,7 @@ def test_a_deferred_close_and_a_repeat_request_are_not_misses():
             {
                 "turn_index": 1,
                 "customer": None,
-                "reply": "Are you looking at this to live in, or as an investment?",
+                "reply": "Are you looking at this for your own use, or as an investment?",
                 "stage": "qualify",
             },
             {
@@ -793,7 +793,7 @@ def test_a_deferred_close_and_a_repeat_request_are_not_misses():
                 "customer": "IHT 11.",
                 "reply": (
                     "Sorry, I didn't catch that. "
-                    "Are you looking at this to live in, or as an investment?"
+                    "Are you looking at this for your own use, or as an investment?"
                 ),
                 "stage": "qualify",
             },
@@ -816,7 +816,7 @@ def test_decide_it_later_and_a_budget_count_as_answers():
             {
                 "turn_index": 4,
                 "customer": "I will decide it later based on the price.",
-                "reply": "Are you looking at this to live in, or as an investment?",
+                "reply": "Are you looking at this for your own use, or as an investment?",
                 "stage": "qualify",
             },
             {
@@ -1011,7 +1011,7 @@ def test_a_single_part_answer_is_not_an_echo_of_the_area_question():
 def test_a_live_in_answer_is_not_an_echo_of_the_purpose_question():
     from local_call.server import mostly_echo
 
-    question = "Are you looking at this to live in, or as an investment?"
+    question = "Are you looking at this for your own use, or as an investment?"
     assert mostly_echo("To live in.", question) is False
     assert mostly_echo("It's to live in.", question) is False
     assert mostly_echo("As an investment.", question) is False
@@ -1460,7 +1460,7 @@ def test_a_cached_clause_is_not_translated_again(monkeypatch):
     assert response.headers["x-audio-format"] == "wav"
 
 
-def test_the_greeting_prepares_the_qualification_lines_first(monkeypatch):
+def test_an_english_greeting_does_not_translate(monkeypatch):
     import app_v3
     from local_call.server import prepare_upcoming
 
@@ -1471,17 +1471,7 @@ def test_the_greeting_prepares_the_qualification_lines_first(monkeypatch):
         lambda clause, language: seen.append((language, clause)),
     )
     prepare_upcoming("Hi, this is Sobha Limited calling.")
-    hindi = [clause for language, clause in seen if language == "hi-IN"]
-    area = next(index for index, clause in enumerate(hindi) if "which part of bengaluru" in clause.lower())
-    configuration = next(index for index, clause in enumerate(hindi) if "configuration" in clause.lower())
-    purpose = next(index for index, clause in enumerate(hindi) if "live in" in clause.lower())
-    assert area < configuration < purpose
-    assert {language for language, _clause in seen} == set(app_v3.SPOKEN_LANGUAGES)
-    joined = " ".join(hindi).lower()
-    assert "as an investment" in joined
-    assert "your own use" in joined
-    assert "interested to know about the project" in joined
-    assert "sales advisor" in joined
+    assert seen == []
 
 
 def test_a_locked_language_prepares_only_that_languages_next_line(monkeypatch):
@@ -1502,7 +1492,7 @@ def test_a_locked_language_prepares_only_that_languages_next_line(monkeypatch):
         "local_call.server._enqueue",
         lambda clause, language: seen.append((language, clause)),
     )
-    prepare_upcoming("Are you looking at this to live in, or as an investment?")
+    prepare_upcoming("Are you looking at this for your own use, or as an investment?")
     assert seen
     assert {language for language, _clause in seen} == {"kn-IN"}
     joined = " ".join(clause for _language, clause in seen).lower()
@@ -1733,7 +1723,7 @@ def test_a_yes_to_altair_is_not_heard_as_bhoganahalli(monkeypatch):
     assert transcript_is_only_keyterms("Bhoganahalli.") is False
 
     app_v3.conversation_memory["last_agent_question"] = (
-        "Are you looking at this to live in, or as an investment?"
+        "Are you looking at this for your own use, or as an investment?"
     )
     purpose = stt_keyterms()
     assert "investment" in purpose

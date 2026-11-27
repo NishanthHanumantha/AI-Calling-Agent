@@ -115,8 +115,9 @@ def test_one_translate_post_records_its_characters(monkeypatch):
     server.call_log.add_reply("Hi.", "greeting", None)
     text = "Thanks for taking the call."
     assert server._request_translation(text, "hi-IN") == "namaste"
-    assert server.call_log.turns[-1]["translation_characters"] == 0
+    assert server.call_log.turns[-1]["translation_characters"] == len(text)
     app_v3.conversation_memory["customer_language"] = "hi-IN"
+    monkeypatch.setattr(server, "translate_text", lambda *_args, **_kwargs: "namaste")
     previous = app_v3.SARVAM_API_KEY
     app_v3.SARVAM_API_KEY = previous or "test-key"
     monkeypatch.setattr(server, "open_bulbul_stream", lambda *_args, **_kwargs: None)

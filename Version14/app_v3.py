@@ -1962,7 +1962,7 @@ def asks_customer_to_choose_size(sentence):
     return bool(mentions_size and not other_topic)
 
 
-PURPOSE_QUESTION = "Are you looking at this to live in, or as an investment?"
+PURPOSE_QUESTION = "Are you looking at this for your own use, or as an investment?"
 LOCATION_QUESTION = "Would you like to know about the location?"
 HOME_QUESTION = "Would you like to hear about the kind of home?"
 PRICE_QUESTION = "Would you like to know the starting price?"
@@ -4139,6 +4139,10 @@ _NAME_LEAD = re.compile(
     r"^(?:my name is|i am|i'm|im|this is|call me|it is|it's|its)\s+",
     re.I,
 )
+_NAME_YES = re.compile(
+    r"^(?:yes|yeah|yep|sure|okay|ok)\s+",
+    re.I,
+)
 _NAME_FILLER = {
     "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "fine", "hello", "hi",
     "hey", "please", "thanks", "thank", "you", "name", "called",
@@ -4174,8 +4178,13 @@ def _customer_name_from(text):
     """One to three name words. A place or a project is left for the catalog."""
     raw = re.sub(r"[^A-Za-z'\s]", " ", text or "")
     raw = re.sub(r"\s+", " ", raw).strip()
-    raw = _NAME_LEAD.sub("", raw).strip()
-    raw = re.sub(r"^(?:yes|yeah|yep|sure|okay|ok)\s+", "", raw, flags=re.I).strip()
+    # "Yeah, I'm Prashant" starts with yeah, so the introduction is removed again after it.
+    while True:
+        stripped = _NAME_YES.sub("", raw).strip()
+        stripped = _NAME_LEAD.sub("", stripped).strip()
+        if stripped == raw:
+            break
+        raw = stripped
     placed = re.match(r"(.+?)\s+(?:from|in|at)\s+(.+)$", raw, re.I)
     if placed and _has_catalog_detail(placed.group(2)):
         raw = placed.group(1).strip()

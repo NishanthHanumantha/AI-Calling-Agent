@@ -101,6 +101,9 @@ def _gate_page(next_path: str, rejected: bool = False) -> HTMLResponse:
     input {{ box-sizing: border-box; width: 100%; padding: 0.85rem 0.95rem; border: 1px solid #e4dccb;
       border-radius: 14px; font: inherit; background: #fbfaf7; }}
     input:focus {{ outline: 2px solid #1b4332; border-color: transparent; }}
+    .show {{ display: flex; align-items: center; gap: 0.45rem; margin: 0.7rem 0 0;
+      color: #5c564e; font-size: 0.92rem; }}
+    .show input {{ width: auto; padding: 0; border: 0; background: transparent; }}
     button {{ width: 100%; margin-top: 0.95rem; background: #1b4332; color: #fff; border: 0;
       border-radius: 999px; padding: 0.8rem 1.25rem; font: inherit; font-weight: 600; cursor: pointer;
       box-shadow: 0 10px 22px rgba(27, 67, 50, 0.22); }}
@@ -114,10 +117,16 @@ def _gate_page(next_path: str, rejected: bool = False) -> HTMLResponse:
     <h1>Sobha AI Calling Agent</h1>
     <p>Enter the review password to talk to the agent.</p>
     <input type="hidden" name="next" value="{safe}">
-    <input type="password" name="passphrase" autocomplete="current-password" required>
+    <input id="passphrase" type="password" name="passphrase" autocomplete="current-password" required>
+    <label class="show"><input id="show-password" type="checkbox"> Show password</label>
     <button type="submit">Continue</button>
     {error}
   </form>
+  <script>
+    document.getElementById("show-password").addEventListener("change", function () {{
+      document.getElementById("passphrase").type = this.checked ? "text" : "password";
+    }});
+  </script>
 </body>
 </html>"""
     return HTMLResponse(body, status_code=401 if rejected else 200)
@@ -546,6 +555,8 @@ def _request_translation(text, target):
     if response.status_code != 200:
         print("LOCAL TRANSLATE STATUS:", response.status_code)
         return None
+    # Sarvam bills this post even when the customer is still speaking English.
+    call_log.note_translate(len(posted))
     try:
         translated = (response.json().get("translated_text") or "").strip()
     except Exception:
@@ -604,20 +615,6 @@ def translate_text(text, target):
         return future.result(timeout=2) or None
     except Exception:
         return None
-
-
-def _fixed_lines():
-    """Qualification lines spoken on every call. The name is asked before the area."""
-    return [
-        app_v3.NAME_QUESTION,
-        app_v3.catalog.AREA_QUESTION,
-        app_v3.catalog.CONFIGURATION_QUESTION,
-        app_v3.catalog.PURPOSE_QUESTION,
-        "Got it. You're looking at this as an investment.",
-        "Got it. You're looking at this for your own use.",
-        "Would you be interested to know about the project?",
-        app_v3.ADVISOR_CLOSE,
-    ]
 
 
 def _predicted_offer():
@@ -698,7 +695,7 @@ def _upcoming_lines(reply):
         lines.append(app_v3.catalog.CONFIGURATION_QUESTION)
     if "which configuration" in low:
         lines.append(app_v3.catalog.PURPOSE_QUESTION)
-    if "live in" in low and "investment" in low:
+    if ("own use" in low or "live in" in low) and "investment" in low:
         offer = _predicted_offer()
         if offer:
             lines.append("Got it. You're looking at this as an investment. " + offer)
@@ -723,14 +720,14 @@ def _enqueue_lines(lines, languages):
 
 
 def prepare_upcoming(reply):
-    """Translate the next line before the customer finishes answering."""
+    """Translate the next line in the language the customer is actually speaking."""
     try:
         language = app_v3.customer_language()
-        if language == "en-IN":
-            _enqueue_lines(_fixed_lines(), app_v3.SPOKEN_LANGUAGES)
+        if language not in app_v3.SPOKEN_LANGUAGES:
             return
-        if language in app_v3.SPOKEN_LANGUAGES:
-            _enqueue_lines(_upcoming_lines(reply), [language])
+        lines = [reply] if (reply or "").strip() else []
+        lines.extend(_upcoming_lines(reply))
+        _enqueue_lines(lines, [language])
     except Exception as exc:
         print("LOCAL TRANSLATE PREPARE:", type(exc).__name__)
 
@@ -838,7 +835,6 @@ async def clause_bytes(text: str):
         translated = translate_text(written, language)
         if translated:
             spoken = translated
-            call_log.note_translate(len(written[:2000]))
         else:
             language = "en-IN"
     app_v3.conversation_memory["speech_language"] = language
@@ -881,7 +877,7 @@ def _one_offered_place(transcript, line):
 def _purpose_choice(transcript, line):
     """One side of the purpose question. The whole question still counts as an echo."""
     low_line = (line or "").lower()
-    if "live in" not in low_line or "investment" not in low_line:
+    if ("own use" not in low_line and "live in" not in low_line) or "investment" not in low_line:
         return False
     low = (transcript or "").lower()
     live = re.search(r"\b(to live|live in|for living|own use|end use)\b", low) is not None
@@ -996,7 +992,6 @@ async def speak_reply(turn: Turn):
         translated = translate_text(written, language)
         if translated:
             spoken = translated
-            call_log.note_translate(len(written[:2000]))
         else:
             language = "en-IN"
     app_v3.conversation_memory["speech_language"] = language
@@ -1101,7 +1096,7 @@ def _yes_no_kind(question):
     low = (question or "").lower()
     if "interested to know about the project" in low:
         return "interest"
-    if "live in" in low and "investment" in low:
+    if ("own use" in low or "live in" in low) and "investment" in low:
         return "purpose"
     if "site visit" in low:
         return "visit"
@@ -1119,7 +1114,7 @@ def stt_keyterms():
     if kind == "interest":
         terms = ["yes", "sure", "yeah", *_offered_project_names()]
     elif kind == "purpose":
-        terms = ["live", "investment"]
+        terms = ["own use", "live", "investment"]
     elif kind == "visit":
         terms = ["yes", "sure", "yeah", *_offered_project_names()]
     else:

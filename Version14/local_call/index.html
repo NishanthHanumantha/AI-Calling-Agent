@@ -389,7 +389,7 @@
 
     function purposeChoice(transcript, line) {
       const asked = (line || "").toLowerCase();
-      if (!asked.includes("live in") || !asked.includes("investment")) return false;
+      if ((!asked.includes("own use") && !asked.includes("live in")) || !asked.includes("investment")) return false;
       const said = (transcript || "").toLowerCase();
       const live = /\b(to live|live in|for living|own use|end use)\b/.test(said);
       const invest = /\binvestment\b/.test(said);
